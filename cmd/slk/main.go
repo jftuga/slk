@@ -621,6 +621,15 @@ func run() error {
 			return lastReadMap[channelID]
 		})
 
+		app.SetChannelVisitRecorder(func(channelID string) {
+			wctx.LastVisitedByChannel[channelID] = time.Now().Unix()
+			go func() {
+				if err := db.RecordChannelVisit(wctx.TeamID, channelID); err != nil {
+					log.Printf("warning: recording channel visit %s/%s: %v", wctx.TeamID, channelID, err)
+				}
+			}()
+		})
+
 		app.SetChannelCacheReader(func(channelID string) []messages.MessageItem {
 			return loadCachedMessages(db, client.UserID(), channelID, userNames, tsFormat)
 		})
