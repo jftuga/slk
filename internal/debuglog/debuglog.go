@@ -118,9 +118,12 @@ func General(format string, args ...any) {
 	logger.Printf("[general] "+format, args...)
 }
 
-// NextReqID returns a process-wide monotonic uint64. Used to correlate
-// image-fetch lifecycle log lines across the enqueue → http →
-// dispatch → recv stages. Safe to call regardless of Enabled().
+// NextReqID returns a process-wide monotonic uint64 starting at 1.
+// The first call returns 1, so the zero value of a uint64 field is
+// a safe "no req_id assigned yet" sentinel for structs that embed
+// an ID (e.g. image.FetchRequest.ReqID). Used to correlate image-fetch
+// lifecycle log lines across the enqueue → http → dispatch → recv
+// stages. Safe to call regardless of Enabled().
 func NextReqID() uint64 {
 	return reqID.Add(1)
 }
