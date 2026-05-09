@@ -19,6 +19,7 @@ import (
 	"github.com/gammons/slk/internal/avatar"
 	"github.com/gammons/slk/internal/cache"
 	"github.com/gammons/slk/internal/config"
+	"github.com/gammons/slk/internal/debuglog"
 	emojiwidth "github.com/gammons/slk/internal/emoji"
 	imgpkg "github.com/gammons/slk/internal/image"
 	"github.com/gammons/slk/internal/notify"
@@ -142,19 +143,16 @@ type WorkspaceContext struct {
 }
 
 func main() {
-	// Debug log to file when SLK_DEBUG is set; otherwise discard so
-	// log lines don't bleed into the user's terminal under altscreen
-	// (some terminals show stderr writes overlaid on the rendered UI;
-	// even if they don't, stderr can show up after slk exits and
-	// pollute the parent shell).
-	if os.Getenv("SLK_DEBUG") != "" {
-		f, err := os.OpenFile("/tmp/slk-debug.log", os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
-		if err == nil {
-			log.SetOutput(f)
-			log.Printf("=== slk debug session started ===")
-		}
-	} else {
-		log.SetOutput(io.Discard)
+	// Debug log: when SLK_DEBUG is set, debuglog.Init opens
+	// slk-debug.log in cwd (truncating any prior session) and routes
+	// both the package-internal logger and the global stdlib log to
+	// it. When unset, stdlib log is routed to io.Discard so spurious
+	// log.Printf calls don't bleed into the user's altscreen TUI.
+	if debugFile, err := debuglog.Init(); err != nil {
+		fmt.Fprintf(os.Stderr, "slk: could not open debug log: %v\n", err)
+	} else if debugFile != nil {
+		defer debugFile.Close()
+		debuglog.General("=== slk debug session started ===")
 	}
 	// Handle simple flags before anything else
 	if len(os.Args) > 1 {
