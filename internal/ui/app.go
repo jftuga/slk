@@ -1513,6 +1513,8 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		debuglog.Cache("NewMessageMsg: channel=%s ts=%s thread_ts=%s active=%s",
 			msg.ChannelID, msg.Message.TS, msg.Message.ThreadTS, a.activeChannelID)
 		if msg.Message.IsEdited {
+			debuglog.Cache("NewMessageMsg: channel=%s ts=%s decision=skipped_edit_echo",
+				msg.ChannelID, msg.Message.TS)
 			// Edit echo: update existing message in place rather than
 			// appending. Gate on the active channel for the main pane
 			// and on the thread panel's channel for the thread cache —
@@ -1533,6 +1535,8 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// MessageSentMsg / ThreadReplySentMsg already updated the UI and
 		// scheduled side effects; redoing them here would double-render.
 		if a.isSelfSent(msg.Message.TS) {
+			debuglog.Cache("NewMessageMsg: channel=%s ts=%s decision=skipped_self_send",
+				msg.ChannelID, msg.Message.TS)
 			break
 		}
 		// Early-arrival suppression: if the WS echo for an slk-
@@ -1548,9 +1552,13 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// official Slack client while slk is open) do NOT update
 		// lastSelfSendByChannel, so they pass through this guard.
 		if msg.Message.UserID != "" && msg.Message.UserID == a.currentUserID && a.selfSendInFlight(msg.ChannelID) {
+			debuglog.Cache("NewMessageMsg: channel=%s ts=%s decision=skipped_self_send_in_flight",
+				msg.ChannelID, msg.Message.TS)
 			break
 		}
 		if msg.ChannelID == a.activeChannelID {
+			debuglog.Cache("NewMessageMsg: channel=%s ts=%s decision=skipped_active_channel",
+				msg.ChannelID, msg.Message.TS)
 			// Route thread replies to the thread panel if it matches the open thread
 			if a.threadVisible && msg.Message.ThreadTS == a.threadPanel.ThreadTS() {
 				a.threadPanel.AddReply(msg.Message)
@@ -1576,7 +1584,12 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// Threads view tracks its own unread state separately.
 			isThreadReply := msg.Message.ThreadTS != "" && msg.Message.ThreadTS != msg.Message.TS
 			if !isThreadReply || msg.Message.Subtype == "thread_broadcast" {
+				debuglog.Cache("NewMessageMsg: channel=%s ts=%s decision=mark_unread",
+					msg.ChannelID, msg.Message.TS)
 				a.sidebar.MarkUnread(msg.ChannelID)
+			} else {
+				debuglog.Cache("NewMessageMsg: channel=%s ts=%s decision=skipped_thread_reply_inactive",
+					msg.ChannelID, msg.Message.TS)
 			}
 		}
 		// A thread reply (regardless of channel) may have changed the

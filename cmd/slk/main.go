@@ -2116,14 +2116,21 @@ func (h *rtmEventHandler) OnMessage(channelID, userID, ts, text, threadTS, subty
 		isThreadReply := threadTS != "" && threadTS != ts
 		isBroadcast := subtype == "thread_broadcast"
 		if !isThreadReply || isBroadcast {
+			countAfter := -1
 			if h.wsCtx != nil {
 				for i := range h.wsCtx.Channels {
 					if h.wsCtx.Channels[i].ID == channelID {
 						h.wsCtx.Channels[i].UnreadCount++
+						countAfter = h.wsCtx.Channels[i].UnreadCount
 						break
 					}
 				}
 			}
+			debuglog.Cache("OnMessage: team=%s channel=%s ts=%s subtype=%q thread_ts=%s decision=bumped_inactive_workspace count_after=%d",
+				h.workspaceID, channelID, ts, subtype, threadTS, countAfter)
+		} else {
+			debuglog.Cache("OnMessage: team=%s channel=%s ts=%s subtype=%q thread_ts=%s decision=skipped_thread_reply_inactive",
+				h.workspaceID, channelID, ts, subtype, threadTS)
 		}
 		if h.program != nil {
 			h.program.Send(ui.WorkspaceUnreadMsg{
@@ -2138,6 +2145,8 @@ func (h *rtmEventHandler) OnMessage(channelID, userID, ts, text, threadTS, subty
 	if resolved, ok := h.userNames[userID]; ok {
 		userName = resolved
 	}
+	debuglog.Cache("OnMessage: team=%s channel=%s ts=%s subtype=%q thread_ts=%s decision=dispatched_to_app",
+		h.workspaceID, channelID, ts, subtype, threadTS)
 	h.program.Send(ui.NewMessageMsg{
 		ChannelID: channelID,
 		Message: messages.MessageItem{
