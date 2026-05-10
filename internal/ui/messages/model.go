@@ -1004,9 +1004,9 @@ func (m *Model) SetUserNames(names map[string]string) {
 // unchanged.
 //
 // Used by the async user-resolution path: history fetchers stash
-// MessageItem.UserName = m.UserID for unknown authors, then a
-// UserResolvedMsg arrives and the App calls PatchUserName to replace
-// the placeholders live without re-fetching history.
+// MessageItem.UserName = m.UserID for unknown authors. When the
+// resolution returns asynchronously, the App calls PatchUserName to
+// replace the placeholders live without re-fetching history.
 func (m *Model) PatchUserName(userID, displayName string) {
 	if userID == "" {
 		return
@@ -1018,15 +1018,15 @@ func (m *Model) PatchUserName(userID, displayName string) {
 		return
 	}
 	m.userNames[userID] = displayName
-	changed := false
+	// The render cache stores rows with their mentions already resolved
+	// (RenderSlackMarkdown consults userNames at render time), so any
+	// cached row that mentioned <@userID> is now stale. Mirror
+	// SetUserNames's behavior: invalidate unconditionally on map change.
+	m.cache = nil
 	for i := range m.messages {
 		if m.messages[i].UserID == userID && m.messages[i].UserName != displayName {
 			m.messages[i].UserName = displayName
-			changed = true
 		}
-	}
-	if changed {
-		m.cache = nil
 	}
 	m.dirty()
 }

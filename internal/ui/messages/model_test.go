@@ -905,3 +905,22 @@ func TestPatchUserName_NoMatchingMessagesStillUpdatesMap(t *testing.T) {
 		t.Errorf("ResolveUserName(U99) = %q, want carol (mention map should update even with no message match)", got)
 	}
 }
+
+func TestPatchUserName_InvalidatesCacheEvenWithNoMatchingMessages(t *testing.T) {
+	// Renders happen with userNames consulted at render time; mention
+	// text in other-authored messages goes stale when userNames
+	// changes. PatchUserName must invalidate the cache even if no
+	// MessageItem.UserID == userID.
+	m := New([]MessageItem{
+		{TS: "1.0", UserID: "alice", UserName: "alice", Text: "hello <@U99>"},
+	}, "general")
+	// Prime the render cache by calling View.
+	_ = m.View(80, 10)
+	if m.cache == nil {
+		t.Fatal("expected cache populated after View(); harness assumption failed")
+	}
+	m.PatchUserName("U99", "carol")
+	if m.cache != nil {
+		t.Error("PatchUserName should have invalidated m.cache so the mention re-resolves")
+	}
+}
