@@ -31,6 +31,11 @@ type FetchRequest struct {
 	CellTarget image.Point // optional target in terminal cells; when nonzero,
 	// the fetcher will pre-render the image into the
 	// active prerender protocol for this cell footprint.
+	// ReqID is a debuglog correlator threaded by the caller from
+	// debuglog.NextReqID() at enqueue time. Zero means "not threaded"
+	// (e.g. avatar fetches that don't participate in the per-image
+	// timeline log). Logged as req_id=N in the [imgfetch] surface.
+	ReqID uint64
 }
 
 // FetchResult is the decoded, downscaled image plus on-disk metadata.
