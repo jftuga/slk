@@ -3378,7 +3378,7 @@ func TestChannelSelected_Tier3_SpinnerOnly(t *testing.T) {
 	app := NewApp()
 	app.SetChannelSyncedAtReader(func(id string) int64 { return 0 })
 	app.SetChannelCacheReader(func(id string) []messages.MessageItem {
-		return []messages.MessageItem{{TS: "1.0", UserID: "U", UserName: "u", Text: "hi"}}
+		return nil // no cache at all → genuine Tier 3
 	})
 	fetchCalled := 0
 	app.SetChannelFetcher(func(id, name string) tea.Msg {
@@ -3394,5 +3394,32 @@ func TestChannelSelected_Tier3_SpinnerOnly(t *testing.T) {
 	}
 	if fetchCalled != 1 {
 		t.Errorf("Tier 3: fetcher should fire once; got %d", fetchCalled)
+	}
+}
+
+func TestChannelSelected_UnknownFreshnessWithCache_FallsToTier2(t *testing.T) {
+	// Production state until Task 15 wires SetChannelSyncedAtReader:
+	// syncedAtReader is nil, cache reader returns rows. Should render
+	// cache + fire fetch + show indicator (Tier 2), NOT blank the
+	// pane with a spinner.
+	app := NewApp()
+	// no SetChannelSyncedAtReader call — leaves it nil
+	app.SetChannelCacheReader(func(id string) []messages.MessageItem {
+		return []messages.MessageItem{{TS: "1.0", UserID: "U", UserName: "u", Text: "hi"}}
+	})
+	fetchCalled := 0
+	app.SetChannelFetcher(func(id, name string) tea.Msg {
+		fetchCalled++
+		return MessagesLoadedMsg{ChannelID: id, Messages: nil}
+	})
+
+	_, cmd := app.Update(ChannelSelectedMsg{ID: "C1", Name: "general", Type: "channel"})
+	drainAllCmds(t, cmd)
+
+	if got := app.messagepane.Messages(); len(got) != 1 {
+		t.Errorf("unknown freshness with cache: pane should render cache; got %d msgs", len(got))
+	}
+	if fetchCalled != 1 {
+		t.Errorf("unknown freshness with cache: fetcher should fire once; got %d", fetchCalled)
 	}
 }

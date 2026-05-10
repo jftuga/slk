@@ -1475,8 +1475,11 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 
 		switch {
-		case syncedAt > 0 && age < cacheFreshThreshold && len(cached) > 0:
-			// Tier 1: cache fresh; render and mark-as-read, no fetch.
+		case syncedAt > 0 && age < cacheFreshThreshold:
+			// Tier 1: provably fresh (cache was just synced). Render whatever
+			// we have (cached can legitimately be empty here — e.g., a channel
+			// verified empty within the last 30s). Mark-as-read if non-empty.
+			// No fetch.
 			a.messagepane.SetLoading(false)
 			a.messagepane.SetMessages(cached)
 			a.statusbar.SetSyncing(false)
@@ -1488,8 +1491,13 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			debuglog.Cache("ChannelSelectedMsg: channel=%s tier=1_fresh", msg.ID)
 
-		case syncedAt > 0 && age < cacheStaleThreshold && len(cached) > 0:
-			// Tier 2: cache-first + verify.
+		case len(cached) > 0:
+			// Tier 2: cache exists, verify in background. Covers
+			// (a) syncedAt > 0 with age >= 30s (any age — we render and verify
+			//     rather than blanking the pane),
+			// (b) syncedAt == 0 (freshness unknown; could be a prior session's
+			//     cache or an un-wired reader). Always render + fire fetch +
+			//     show indicator so the user knows it's being checked.
 			a.messagepane.SetLoading(false)
 			a.messagepane.SetMessages(cached)
 			a.statusbar.SetSyncing(true)
@@ -1497,7 +1505,8 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			debuglog.Cache("ChannelSelectedMsg: channel=%s tier=2_verify", msg.ID)
 
 		default:
-			// Tier 3: stale or never-synced — spinner only.
+			// Tier 3: no cache at all (genuine cold-start, never-visited
+			// channel). Spinner + fetch.
 			a.messagepane.SetLoading(true)
 			a.messagepane.SetMessages(nil)
 			a.statusbar.SetSyncing(false)
