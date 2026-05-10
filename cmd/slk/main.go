@@ -1541,14 +1541,17 @@ func loadCachedMessages(
 	tsFormat string,
 ) []messages.MessageItem {
 	if db == nil {
+		debuglog.Cache("loadCachedMessages: channel=%s db=nil", channelID)
 		return nil
 	}
+	debuglog.Cache("loadCachedMessages: channel=%s entry", channelID)
 	rows, err := db.GetMessages(channelID, 50, "")
 	if err != nil {
 		debuglog.Cache("loadCachedMessages: GetMessages %s: %v", channelID, err)
 		return nil
 	}
 	if len(rows) == 0 {
+		debuglog.Cache("loadCachedMessages: channel=%s result count=0 (no cached rows)", channelID)
 		return nil
 	}
 
@@ -1556,6 +1559,7 @@ func loadCachedMessages(
 	for _, m := range rows {
 		out = append(out, enrichCachedRow(db, selfUserID, channelID, m, userNames, tsFormat, "loadCachedMessages"))
 	}
+	debuglog.Cache("loadCachedMessages: channel=%s result %s", channelID, summarizeMessages(out))
 	return out
 }
 
@@ -1681,14 +1685,17 @@ func loadCachedThreadReplies(
 	tsFormat string,
 ) []messages.MessageItem {
 	if db == nil {
+		debuglog.Cache("loadCachedThreadReplies: channel=%s thread_ts=%s db=nil", channelID, threadTS)
 		return nil
 	}
+	debuglog.Cache("loadCachedThreadReplies: channel=%s thread_ts=%s entry", channelID, threadTS)
 	rows, err := db.GetThreadReplies(channelID, threadTS)
 	if err != nil {
 		debuglog.Cache("loadCachedThreadReplies: GetThreadReplies %s/%s: %v", channelID, threadTS, err)
 		return nil
 	}
 	if len(rows) == 0 {
+		debuglog.Cache("loadCachedThreadReplies: channel=%s thread_ts=%s result count=0", channelID, threadTS)
 		return nil
 	}
 
@@ -1696,6 +1703,8 @@ func loadCachedThreadReplies(
 	for _, m := range rows {
 		out = append(out, enrichCachedRow(db, selfUserID, channelID, m, userNames, tsFormat, "loadCachedThreadReplies"))
 	}
+	debuglog.Cache("loadCachedThreadReplies: channel=%s thread_ts=%s result %s",
+		channelID, threadTS, summarizeMessages(out))
 	return out
 }
 
