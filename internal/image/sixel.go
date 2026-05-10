@@ -6,6 +6,7 @@ import (
 	"io"
 	"strings"
 
+	"github.com/gammons/slk/internal/debuglog"
 	gosixel "github.com/mattn/go-sixel"
 	"golang.org/x/image/draw"
 )
@@ -24,6 +25,7 @@ func NewSixelRenderer() *SixelRenderer {
 // Otherwise, the Fallback (half-block) Lines are emitted instead.
 func (s *SixelRenderer) Render(img image.Image, target image.Point) Render {
 	if target.X <= 0 || target.Y <= 0 {
+		debuglog.ImgRender("sixel.Render: target=(%d,%d) abort=zero_target", target.X, target.Y)
 		return Render{Cells: target}
 	}
 
@@ -35,9 +37,12 @@ func (s *SixelRenderer) Render(img image.Image, target image.Point) Render {
 	var sx bytes.Buffer
 	enc := gosixel.NewEncoder(&sx)
 	if err := enc.Encode(resized); err != nil {
+		debuglog.ImgRender("sixel.Render: target=(%d,%d) encode_err=%v fallback=halfblock",
+			target.X, target.Y, err)
 		return HalfBlockRenderer{}.Render(img, target)
 	}
 	sixelBytes := sx.Bytes()
+	debuglog.ImgRender("sixel.Render: target=(%d,%d) sixel_bytes=%d", target.X, target.Y, len(sixelBytes))
 
 	hb := HalfBlockRenderer{}.Render(img, target)
 

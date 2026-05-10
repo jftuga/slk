@@ -10,6 +10,7 @@ import (
 
 	"charm.land/lipgloss/v2"
 	"github.com/charmbracelet/x/ansi"
+	"github.com/gammons/slk/internal/debuglog"
 	emojiutil "github.com/gammons/slk/internal/emoji"
 	imgpkg "github.com/gammons/slk/internal/image"
 	"github.com/gammons/slk/internal/ui/imgrender"
@@ -337,9 +338,13 @@ func (m *Model) SetFocused(focused bool) {
 // entry to mark stale.
 func (m *Model) HandleImageReady(channel, ts, key string) {
 	if channel != m.channelName {
+		debuglog.ImgFetch("messages.HandleImageReady: channel=%q active_channel=%q key=%s SKIP (not active)",
+			channel, m.channelName, key)
 		return
 	}
 	if key == "" {
+		debuglog.ImgFetch("messages.HandleImageReady: channel=%q ts=%s key=<empty> legacy_path",
+			channel, ts)
 		// Legacy path: no per-key bookkeeping available, so we fall
 		// back to the wholesale invalidation that the new fast path
 		// is meant to avoid. Used by tests that drive transitions
@@ -352,7 +357,9 @@ func (m *Model) HandleImageReady(channel, ts, key string) {
 		return
 	}
 	if m.imgRenderer != nil {
-		m.imgRenderer.ClearFetching(key)
+		cleared := m.imgRenderer.ClearFetching(key)
+		debuglog.ImgFetch("messages.HandleImageReady: channel=%q key=%s cleared=%v",
+			channel, key, cleared)
 	}
 	if ts != "" && m.cache != nil {
 		if m.staleEntries == nil {
@@ -385,7 +392,9 @@ func (m *Model) HandleImageFailed(key string) {
 	if m.imgRenderer == nil {
 		m.imgRenderer = imgrender.NewRenderer()
 	}
-	m.imgRenderer.MarkFailed(key)
+	tracked := m.imgRenderer.MarkFailed(key)
+	debuglog.ImgFetch("messages.HandleImageFailed: channel=%q key=%s was_in_flight=%v",
+		m.channelName, key, tracked)
 }
 
 // Version returns a counter that increments every time the View() output
@@ -456,6 +465,12 @@ func channelGlyph(chType string) string {
 }
 
 func (m *Model) SetMessages(msgs []MessageItem) {
+	if debuglog.Enabled() {
+		oldSummary := summarizeMessageItems(m.messages)
+		newSummary := summarizeMessageItems(msgs)
+		debuglog.Cache("messages.Model.SetMessages: channel=%q before=[%s] after=[%s]",
+			m.channelName, oldSummary, newSummary)
+	}
 	m.messages = msgs
 	m.ClearSelection()
 	m.cache = nil // invalidate cache
@@ -688,6 +703,10 @@ func (m *Model) PrependMessages(msgs []MessageItem) {
 		return
 	}
 	count := len(msgs)
+	if debuglog.Enabled() {
+		debuglog.Cache("messages.Model.PrependMessages: channel=%q count_before=%d count_added=%d added=[%s]",
+			m.channelName, len(m.messages), count, summarizeMessageItems(msgs))
+	}
 	m.messages = append(msgs, m.messages...)
 	m.selected += count
 	m.cache = nil // invalidate cache
@@ -2457,4 +2476,16 @@ func formatDateSeparator(dateStr string) string {
 	default:
 		return d.Format("Monday, January 2, 2006")
 	}
+}
+
+// summarizeMessageItems collapses a slice into a compact
+// "count=N oldest=<ts> newest=<ts>" string for [cache] log lines.
+// Empty/nil slices return "count=0". Mirrors summarizeMessages in
+// cmd/slk/main.go but lives here to avoid a circular import.
+func summarizeMessageItems(items []MessageItem) string {
+	if len(items) == 0 {
+		return "count=0"
+	}
+	return fmt.Sprintf("count=%d oldest=%s newest=%s",
+		len(items), items[0].TS, items[len(items)-1].TS)
 }

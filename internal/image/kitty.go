@@ -11,6 +11,7 @@ import (
 	"sync"
 	"sync/atomic"
 
+	"github.com/gammons/slk/internal/debuglog"
 	"golang.org/x/image/draw"
 )
 
@@ -92,12 +93,20 @@ func (k *KittyRenderer) RenderKey(key string, target image.Point) Render {
 	src, ok := k.sources[key]
 	k.mu.Unlock()
 	if !ok || target.X <= 0 || target.Y <= 0 {
+		reason := "no_source"
+		if ok {
+			reason = "zero_target"
+		}
+		debuglog.ImgRender("kitty.RenderKey: key=%s target=(%d,%d) abort reason=%s",
+			key, target.X, target.Y, reason)
 		return Render{Cells: target}
 	}
 
 	id, fresh := k.registry.Lookup(key, target)
 
 	lines := buildPlaceholderLines(id, target)
+	debuglog.ImgRender("kitty.RenderKey: key=%s target=(%d,%d) image_id=%d fresh=%v lines=%d",
+		key, target.X, target.Y, id, fresh, len(lines))
 
 	r := Render{
 		Cells:    target,
@@ -127,6 +136,8 @@ func (k *KittyRenderer) RenderKey(key string, target image.Point) Render {
 				if !fired.CompareAndSwap(false, true) {
 					return nil
 				}
+				debuglog.ImgRender("kitty.OnFlush: image_id=%d cells=(%d,%d) payload_len=%d",
+					imgID, cellsCols, cellsRows, len(payload))
 				return emitKittyUpload(w, imgID, payload, cellsCols, cellsRows)
 			}
 		}

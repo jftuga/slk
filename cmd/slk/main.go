@@ -19,6 +19,7 @@ import (
 	"github.com/gammons/slk/internal/avatar"
 	"github.com/gammons/slk/internal/cache"
 	"github.com/gammons/slk/internal/config"
+	"github.com/gammons/slk/internal/debuglog"
 	emojiwidth "github.com/gammons/slk/internal/emoji"
 	imgpkg "github.com/gammons/slk/internal/image"
 	"github.com/gammons/slk/internal/notify"
@@ -148,19 +149,20 @@ type WorkspaceContext struct {
 }
 
 func main() {
-	// Debug log to file when SLK_DEBUG is set; otherwise discard so
-	// log lines don't bleed into the user's terminal under altscreen
-	// (some terminals show stderr writes overlaid on the rendered UI;
-	// even if they don't, stderr can show up after slk exits and
-	// pollute the parent shell).
-	if os.Getenv("SLK_DEBUG") != "" {
-		f, err := os.OpenFile("/tmp/slk-debug.log", os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
-		if err == nil {
-			log.SetOutput(f)
-			log.Printf("=== slk debug session started ===")
-		}
-	} else {
-		log.SetOutput(io.Discard)
+	// Debug log: when SLK_DEBUG is set, debuglog.Init opens
+	// slk-debug.log in cwd (truncating any prior session) and routes
+	// both the package-internal logger and the global stdlib log to
+	// it. When unset, stdlib log is routed to io.Discard so spurious
+	// log.Printf calls don't bleed into the user's altscreen TUI.
+	if debugFile, err := debuglog.Init(); err != nil {
+		fmt.Fprintf(os.Stderr, "slk: could not open debug log: %v\n", err)
+	} else if debugFile != nil {
+		// Defer fires only on the clean main() return path; os.Exit
+		// in the flag-handling block below skips it. That's fine —
+		// the OS reclaims the FD on process exit and stdlib log
+		// writes are unbuffered, so no log lines are lost.
+		defer debugFile.Close()
+		debuglog.General("=== slk debug session started ===")
 	}
 	// Handle simple flags before anything else
 	if len(os.Args) > 1 {
@@ -416,19 +418,19 @@ func run() error {
 	if proto == imgpkg.ProtoKitty && term.IsTerminal(int(os.Stdin.Fd())) {
 		state, err := term.MakeRaw(int(os.Stdin.Fd()))
 		if err != nil {
-			log.Printf("kitty probe skipped: cannot enter raw mode: %v", err)
+			debuglog.ImgRender("kitty probe skipped: cannot enter raw mode: %v", err)
 		} else {
 			ok := imgpkg.ProbeKittyGraphics(os.Stdout, os.Stdin, 200*time.Millisecond)
 			if rerr := term.Restore(int(os.Stdin.Fd()), state); rerr != nil {
-				log.Printf("term restore after kitty probe: %v", rerr)
+				debuglog.ImgRender("term restore after kitty probe: %v", rerr)
 			}
 			if !ok {
-				log.Println("kitty probe failed, downgrading to halfblock")
+				debuglog.ImgRender("kitty probe failed, downgrading to halfblock")
 				proto = imgpkg.ProtoHalfBlock
 			}
 		}
 	}
-	log.Printf("image protocol: %s", proto)
+	debuglog.ImgRender("image protocol: %s", proto)
 
 	// Avatars use kitty graphics when available (sharper). Sixel and
 	// half-block terminals fall back to half-block — re-emitting sixel
@@ -437,7 +439,7 @@ func run() error {
 
 	// Cell pixel metrics for sizing decisions.
 	pxW, pxH := imgpkg.CellPixels(int(os.Stdout.Fd()))
-	log.Printf("cell pixels: %dx%d", pxW, pxH)
+	debuglog.ImgRender("cell pixels: %dx%d", pxW, pxH)
 
 	// Wire the inline-image pipeline into the messages pane. SendMsg
 	// stays nil here because tea.NewProgram has not run yet; we re-call
@@ -1235,7 +1237,10 @@ func connectWorkspace(ctx context.Context, token slackclient.Token, db *cache.DB
 	}
 
 	// Fetch unread counts
-	unreadCounts, threadsAgg, _ := client.GetUnreadCounts()
+	unreadCounts, threadsAgg, ucErr := client.GetUnreadCounts()
+	if ucErr != nil {
+		debuglog.Cache("workspace_unread_bootstrap: team=%s GetUnreadCounts failed: %v", token.TeamName, ucErr)
+	}
 	wctx.ThreadsHasUnreads = threadsAgg.HasUnreads
 	unreadMap := make(map[string]int)
 	for _, u := range unreadCounts {
@@ -1262,6 +1267,35 @@ func connectWorkspace(ctx context.Context, token slackclient.Token, db *cache.DB
 		}
 	}
 	log.Printf("workspace %s: %d/%d channel items marked IsMuted after build", token.TeamName, mutedItemCount, len(wctx.Channels))
+
+	// Bootstrap-time unread/mute summary so a user can grep
+	// `[cache] workspace_unread_bootstrap` after launch and see what
+	// slk learned from client.counts vs. what the official Slack
+	// desktop client shows. Only per-channel-detail-log the unread
+	// ones; the muted-vs-unread aggregates are sufficient baseline
+	// for everything else.
+	if debuglog.Enabled() {
+		var unreadChans, mutedChans, unreadAndUnmuted int
+		for _, ch := range wctx.Channels {
+			if ch.UnreadCount > 0 {
+				unreadChans++
+				if !ch.IsMuted {
+					unreadAndUnmuted++
+				}
+			}
+			if ch.IsMuted {
+				mutedChans++
+			}
+		}
+		debuglog.Cache("workspace_unread_bootstrap: team=%s total=%d unread_count_>0=%d muted=%d unread_unmuted=%d threads_has_unreads=%v threads_unread=%d",
+			token.TeamName, len(wctx.Channels), unreadChans, mutedChans, unreadAndUnmuted, threadsAgg.HasUnreads, threadsAgg.UnreadCount)
+		for _, ch := range wctx.Channels {
+			if ch.UnreadCount > 0 {
+				debuglog.Cache("workspace_unread_bootstrap: team=%s channel=%s name=%q type=%s unread=%d last_read=%s muted=%v",
+					token.TeamName, ch.ID, ch.Name, ch.Type, ch.UnreadCount, ch.LastReadTS, ch.IsMuted)
+			}
+		}
+	}
 
 	// Finder items are built alongside the sidebar items in the loop above
 	// (see buildChannelItem). The user is a member of every channel returned
@@ -1471,14 +1505,20 @@ func resolveUser(client *slackclient.Client, userID string, userNames map[string
 
 func fetchOlderMessages(client *slackclient.Client, channelID, latestTS string, db *cache.DB, userNames map[string]string, tsFormat string, avatarCache *avatar.Cache) []messages.MessageItem {
 	ctx := context.Background()
+	debuglog.Cache("fetchOlderMessages: channel=%s latest_ts=%s entry", channelID, latestTS)
+	start := time.Now()
 	history, err := client.GetOlderHistory(ctx, channelID, 50, latestTS)
 	if err != nil {
+		debuglog.Cache("fetchOlderMessages: GetOlderHistory %s: %v dur_ms=%d (returning nil → keep cache)",
+			channelID, err, time.Since(start).Milliseconds())
 		return nil
 	}
 
 	var msgItems []messages.MessageItem
 	for _, m := range history {
 		rawBytes, _ := json.Marshal(m)
+		debuglog.Cache("fetchOlderMessages: upsert channel=%s ts=%s subtype=%q reply_count=%d files=%d",
+			channelID, m.Timestamp, m.SubType, m.ReplyCount, len(m.Files))
 		db.UpsertMessage(cache.Message{
 			TS:          m.Timestamp,
 			ChannelID:   channelID,
@@ -1533,7 +1573,32 @@ func fetchOlderMessages(client *slackclient.Client, channelID, latestTS string, 
 		msgItems[i], msgItems[j] = msgItems[j], msgItems[i]
 	}
 
+	debuglog.Cache("fetchOlderMessages: channel=%s latest_ts=%s result %s dur_ms=%d (older history backfill)",
+		channelID, latestTS, summarizeMessages(msgItems), time.Since(start).Milliseconds())
 	return msgItems
+}
+
+// summarizeMessages collapses a slice of messages.MessageItem into a
+// compact "count=N oldest=<ts> newest=<ts>" string for [cache] log
+// lines. Empty/nil slices return "count=0" with no ts fields. Assumes
+// the slice is sorted ascending by TS (the convention everywhere in
+// slk's cache and fetch paths).
+func summarizeMessages(items []messages.MessageItem) string {
+	if len(items) == 0 {
+		return "count=0"
+	}
+	return fmt.Sprintf("count=%d oldest=%s newest=%s",
+		len(items), items[0].TS, items[len(items)-1].TS)
+}
+
+// summarizeCachedRows is summarizeMessages's twin for raw cache.Message
+// rows (used by loadCachedMessages / loadCachedThreadReplies).
+func summarizeCachedRows(rows []cache.Message) string {
+	if len(rows) == 0 {
+		return "count=0"
+	}
+	return fmt.Sprintf("count=%d oldest=%s newest=%s",
+		len(rows), rows[0].TS, rows[len(rows)-1].TS)
 }
 
 // loadCachedMessages reads up to 50 cached messages for a channel from
@@ -1562,14 +1627,17 @@ func loadCachedMessages(
 	tsFormat string,
 ) []messages.MessageItem {
 	if db == nil {
+		debuglog.Cache("loadCachedMessages: channel=%s db=nil", channelID)
 		return nil
 	}
+	debuglog.Cache("loadCachedMessages: channel=%s entry", channelID)
 	rows, err := db.GetMessages(channelID, 50, "")
 	if err != nil {
-		log.Printf("loadCachedMessages: GetMessages %s: %v", channelID, err)
+		debuglog.Cache("loadCachedMessages: GetMessages %s: %v", channelID, err)
 		return nil
 	}
 	if len(rows) == 0 {
+		debuglog.Cache("loadCachedMessages: channel=%s result count=0 (no cached rows)", channelID)
 		return nil
 	}
 
@@ -1577,6 +1645,7 @@ func loadCachedMessages(
 	for _, m := range rows {
 		out = append(out, enrichCachedRow(db, selfUserID, channelID, m, userNames, tsFormat, "loadCachedMessages"))
 	}
+	debuglog.Cache("loadCachedMessages: channel=%s result %s", channelID, summarizeMessages(out))
 	return out
 }
 
@@ -1646,7 +1715,7 @@ func enrichCachedRow(
 			})
 		}
 	} else {
-		log.Printf("%s: GetReactions %s/%s: %v", logPrefix, channelID, m.TS, err)
+		debuglog.Cache("%s: GetReactions %s/%s: %v", logPrefix, channelID, m.TS, err)
 	}
 
 	// Attachments / blocks / legacy attachments come from
@@ -1658,7 +1727,7 @@ func enrichCachedRow(
 	if m.RawJSON != "" {
 		var raw slack.Message
 		if err := json.Unmarshal([]byte(m.RawJSON), &raw); err != nil {
-			log.Printf("%s: raw_json unmarshal for %s/%s: %v",
+			debuglog.Cache("%s: raw_json unmarshal for %s/%s: %v",
 				logPrefix, channelID, m.TS, err)
 		} else {
 			attachments = extractAttachments(raw.Files)
@@ -1702,14 +1771,17 @@ func loadCachedThreadReplies(
 	tsFormat string,
 ) []messages.MessageItem {
 	if db == nil {
+		debuglog.Cache("loadCachedThreadReplies: channel=%s thread_ts=%s db=nil", channelID, threadTS)
 		return nil
 	}
+	debuglog.Cache("loadCachedThreadReplies: channel=%s thread_ts=%s entry", channelID, threadTS)
 	rows, err := db.GetThreadReplies(channelID, threadTS)
 	if err != nil {
-		log.Printf("loadCachedThreadReplies: GetThreadReplies %s/%s: %v", channelID, threadTS, err)
+		debuglog.Cache("loadCachedThreadReplies: GetThreadReplies %s/%s: %v", channelID, threadTS, err)
 		return nil
 	}
 	if len(rows) == 0 {
+		debuglog.Cache("loadCachedThreadReplies: channel=%s thread_ts=%s result count=0", channelID, threadTS)
 		return nil
 	}
 
@@ -1717,6 +1789,8 @@ func loadCachedThreadReplies(
 	for _, m := range rows {
 		out = append(out, enrichCachedRow(db, selfUserID, channelID, m, userNames, tsFormat, "loadCachedThreadReplies"))
 	}
+	debuglog.Cache("loadCachedThreadReplies: channel=%s thread_ts=%s result %s",
+		channelID, threadTS, summarizeMessages(out))
 	return out
 }
 
@@ -1732,15 +1806,20 @@ func loadCachedThreadReplies(
 // cache view. Do NOT change nil to mean "empty channel".
 func fetchChannelMessages(client *slackclient.Client, channelID string, db *cache.DB, userNames map[string]string, tsFormat string, avatarCache *avatar.Cache) []messages.MessageItem {
 	ctx := context.Background()
+	debuglog.Cache("fetchChannelMessages: channel=%s entry", channelID)
+	start := time.Now()
 	history, err := client.GetHistory(ctx, channelID, 50, "")
 	if err != nil {
-		log.Printf("fetchChannelMessages: GetHistory %s: %v", channelID, err)
+		debuglog.Cache("fetchChannelMessages: GetHistory %s: %v dur_ms=%d (returning nil → keep cache)",
+			channelID, err, time.Since(start).Milliseconds())
 		return nil
 	}
 
 	msgItems := make([]messages.MessageItem, 0, len(history))
 	for _, m := range history {
 		rawBytes, _ := json.Marshal(m)
+		debuglog.Cache("fetchChannelMessages: upsert channel=%s ts=%s subtype=%q reply_count=%d files=%d",
+			channelID, m.Timestamp, m.SubType, m.ReplyCount, len(m.Files))
 		db.UpsertMessage(cache.Message{
 			TS:          m.Timestamp,
 			ChannelID:   channelID,
@@ -1795,6 +1874,8 @@ func fetchChannelMessages(client *slackclient.Client, channelID string, db *cach
 		msgItems[i], msgItems[j] = msgItems[j], msgItems[i]
 	}
 
+	debuglog.Cache("fetchChannelMessages: channel=%s result %s dur_ms=%d (authoritative replace)",
+		channelID, summarizeMessages(msgItems), time.Since(start).Milliseconds())
 	return msgItems
 }
 
@@ -1805,15 +1886,20 @@ func fetchChannelMessages(client *slackclient.Client, channelID string, db *cach
 // an already-rendered cached view.
 func fetchThreadReplies(client *slackclient.Client, channelID, threadTS string, db *cache.DB, userNames map[string]string, tsFormat string, avatarCache *avatar.Cache) []messages.MessageItem {
 	ctx := context.Background()
+	debuglog.Cache("fetchThreadReplies: channel=%s thread_ts=%s entry", channelID, threadTS)
+	start := time.Now()
 	history, err := client.GetReplies(ctx, channelID, threadTS)
 	if err != nil {
-		log.Printf("fetchThreadReplies: GetReplies %s/%s: %v", channelID, threadTS, err)
+		debuglog.Cache("fetchThreadReplies: GetReplies %s/%s: %v dur_ms=%d (returning nil → keep cache)",
+			channelID, threadTS, err, time.Since(start).Milliseconds())
 		return nil
 	}
 
 	msgItems := make([]messages.MessageItem, 0, len(history))
 	for _, m := range history {
 		rawBytes, _ := json.Marshal(m)
+		debuglog.Cache("fetchThreadReplies: upsert channel=%s ts=%s subtype=%q reply_count=%d files=%d",
+			channelID, m.Timestamp, m.SubType, m.ReplyCount, len(m.Files))
 		db.UpsertMessage(cache.Message{
 			TS:          m.Timestamp,
 			ChannelID:   channelID,
@@ -1866,10 +1952,15 @@ func fetchThreadReplies(client *slackclient.Client, channelID, threadTS string, 
 	// First message from GetConversationReplies is the parent -- skip it for the replies list.
 	// Return non-nil empty on success-no-replies so the consumer can distinguish from the
 	// error path (which returns nil above).
+	var out []messages.MessageItem
 	if len(msgItems) > 1 {
-		return msgItems[1:]
+		out = msgItems[1:]
+	} else {
+		out = []messages.MessageItem{}
 	}
-	return []messages.MessageItem{}
+	debuglog.Cache("fetchThreadReplies: channel=%s thread_ts=%s result %s dur_ms=%d (authoritative replace)",
+		channelID, threadTS, summarizeMessages(out), time.Since(start).Milliseconds())
+	return out
 }
 
 func formatTimestamp(ts, format string) string {
@@ -2071,14 +2162,21 @@ func (h *rtmEventHandler) OnMessage(channelID, userID, ts, text, threadTS, subty
 		isThreadReply := threadTS != "" && threadTS != ts
 		isBroadcast := subtype == "thread_broadcast"
 		if !isThreadReply || isBroadcast {
+			countAfter := -1
 			if h.wsCtx != nil {
 				for i := range h.wsCtx.Channels {
 					if h.wsCtx.Channels[i].ID == channelID {
 						h.wsCtx.Channels[i].UnreadCount++
+						countAfter = h.wsCtx.Channels[i].UnreadCount
 						break
 					}
 				}
 			}
+			debuglog.Cache("OnMessage: team=%s channel=%s ts=%s subtype=%q thread_ts=%s decision=bumped_inactive_workspace count_after=%d",
+				h.workspaceID, channelID, ts, subtype, threadTS, countAfter)
+		} else {
+			debuglog.Cache("OnMessage: team=%s channel=%s ts=%s subtype=%q thread_ts=%s decision=skipped_thread_reply_inactive",
+				h.workspaceID, channelID, ts, subtype, threadTS)
 		}
 		if h.program != nil {
 			h.program.Send(ui.WorkspaceUnreadMsg{
@@ -2093,6 +2191,8 @@ func (h *rtmEventHandler) OnMessage(channelID, userID, ts, text, threadTS, subty
 	if resolved, ok := h.userNames[userID]; ok {
 		userName = resolved
 	}
+	debuglog.Cache("OnMessage: team=%s channel=%s ts=%s subtype=%q thread_ts=%s decision=dispatched_to_app",
+		h.workspaceID, channelID, ts, subtype, threadTS)
 	h.program.Send(ui.NewMessageMsg{
 		ChannelID: channelID,
 		Message: messages.MessageItem{
@@ -2483,9 +2583,7 @@ func (h *rtmEventHandler) OnChannelSectionChannelsRemoved(sectionID string, chan
 // re-render. Other prefs are ignored — add a case here when slk grows
 // support for them.
 func (h *rtmEventHandler) OnPrefChange(name, value string) {
-	if debugWSEvents {
-		log.Printf("pref_change received: name=%q value-len=%d", name, len(value))
-	}
+	debuglog.WS("pref_change received: name=%q value-len=%d", name, len(value))
 	// Both names are routes to mute state. all_notifications_prefs is
 	// the live per-channel notification blob (current Slack); the flat
 	// muted_channels pref is legacy back-compat.
@@ -2496,17 +2594,12 @@ func (h *rtmEventHandler) OnPrefChange(name, value string) {
 		return
 	}
 	changed := h.wsCtx.MuteStore.ApplyPrefChange(name, value)
-	log.Printf("pref_change %s for %s: changed=%v muted=%v", name, h.wsCtx.TeamName, changed, h.wsCtx.MuteStore.MutedChannels())
+	debuglog.WS("pref_change %s for %s: changed=%v muted=%v", name, h.wsCtx.TeamName, changed, h.wsCtx.MuteStore.MutedChannels())
 	if !changed {
 		return
 	}
 	h.refreshMutedForActive()
 }
-
-// debugWSEvents flips on extra per-event logging when SLK_DEBUG_WS is
-// set. Same env var the slack package uses for unknown-event dumps;
-// reuse so users can flip both on with one variable.
-var debugWSEvents = os.Getenv("SLK_DEBUG_WS") != ""
 
 // refreshMutedForActive walks wctx.Channels, refreshes each item's
 // IsMuted flag from the current MuteStore, and posts a
@@ -2521,7 +2614,14 @@ func (h *rtmEventHandler) refreshMutedForActive() {
 	}
 	store := h.wsCtx.MuteStore
 	for i := range h.wsCtx.Channels {
-		h.wsCtx.Channels[i].IsMuted = store.IsMuted(h.wsCtx.Channels[i].ID)
+		chID := h.wsCtx.Channels[i].ID
+		before := h.wsCtx.Channels[i].IsMuted
+		after := store.IsMuted(chID)
+		if before != after {
+			debuglog.Cache("refreshMutedForActive: channel=%s name=%q muted_before=%v muted_after=%v",
+				chID, h.wsCtx.Channels[i].Name, before, after)
+		}
+		h.wsCtx.Channels[i].IsMuted = after
 	}
 	if h.program == nil {
 		return

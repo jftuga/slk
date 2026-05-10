@@ -13,12 +13,13 @@ import (
 	"context"
 	"image"
 	"io"
-	"log"
 	"strings"
+	"time"
 
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
 
+	"github.com/gammons/slk/internal/debuglog"
 	imgpkg "github.com/gammons/slk/internal/image"
 	"github.com/gammons/slk/internal/ui/styles"
 )
@@ -44,19 +45,23 @@ type ImageContext struct {
 // ImageReadyMsg is dispatched by the prefetcher when an image
 // attachment has finished downloading and decoding. The host panel
 // uses Channel + TS to identify the affected message; Key clears the
-// in-flight bit on the renderer that was tracking the fetch.
+// in-flight bit on the renderer that was tracking the fetch. ReqID
+// is the debuglog correlator threaded from the enqueue site.
 type ImageReadyMsg struct {
 	Channel string
 	TS      string
 	Key     string
+	ReqID   uint64
 }
 
 // ImageFailedMsg is dispatched when all auth attempts for an image
 // have failed. Carries the cache key only; hosts use it to mark the
 // key as permanently failed so RenderBlock won't re-spawn a fetch
-// goroutine until the channel is switched.
+// goroutine until the channel is switched. ReqID is the debuglog
+// correlator threaded from the enqueue site.
 type ImageFailedMsg struct {
-	Key string
+	Key   string
+	ReqID uint64
 }
 
 // ThumbSpec describes a single available thumbnail for an image.
@@ -99,10 +104,14 @@ type SixelEntry struct {
 // (matching the existing messages-pane behavior).
 func computeImageTarget(thumbs []ThumbSpec, ctx ImageContext, availWidth int) image.Point {
 	if len(thumbs) == 0 || ctx.CellPixels.X <= 0 || ctx.CellPixels.Y <= 0 {
+		debuglog.ImgRender("computeImageTarget: thumbs=%d cell_px=(%d,%d) → zero target",
+			len(thumbs), ctx.CellPixels.X, ctx.CellPixels.Y)
 		return image.Point{}
 	}
 	largest := thumbs[len(thumbs)-1]
 	if largest.W <= 0 || largest.H <= 0 {
+		debuglog.ImgRender("computeImageTarget: largest_thumb_dims=(%d,%d) → zero target",
+			largest.W, largest.H)
 		return image.Point{}
 	}
 	aspect := float64(largest.W) / float64(largest.H)
@@ -120,13 +129,18 @@ func computeImageTarget(thumbs []ThumbSpec, ctx ImageContext, availWidth int) im
 	if cols < 1 {
 		cols = 1
 	}
+	clamped := false
 	if cols > maxCols {
 		cols = maxCols
 		rows = int(float64(cols) * cellRatio / aspect)
+		clamped = true
 	}
 	if rows < 1 {
 		rows = 1
 	}
+	debuglog.ImgRender("computeImageTarget: natural=(%d,%d) avail_cols=%d MaxCols=%d MaxRows=%d cell_px=(%d,%d) target=(%d,%d) clamped_to_cols=%v",
+		largest.W, largest.H, availWidth, ctx.MaxCols, ctx.MaxRows,
+		ctx.CellPixels.X, ctx.CellPixels.Y, cols, rows, clamped)
 	return image.Pt(cols, rows)
 }
 
@@ -286,14 +300,17 @@ func (r *Renderer) RenderBlock(att Block, channel, ts string, availWidth, baseRo
 	// Fall through to the legacy text line for any attachment we can't
 	// or shouldn't render inline.
 	if att.Kind != "image" || r.ctx.Protocol == imgpkg.ProtoOff || r.ctx.Fetcher == nil {
+		debuglog.ImgRender("RenderBlock: file_id=%s decision=legacy_text reason=non_image_or_off", att.FileID)
 		return BlockResult{Lines: []string{renderLegacyLine(att)}, Height: 1}
 	}
 	if att.FileID == "" {
+		debuglog.ImgRender("RenderBlock: decision=legacy_text reason=no_file_id name=%q", att.Name)
 		return BlockResult{Lines: []string{renderLegacyLine(att)}, Height: 1}
 	}
 
 	target := computeImageTarget(att.Thumbs, r.ctx, availWidth)
 	if target.X <= 0 || target.Y <= 0 {
+		debuglog.ImgRender("RenderBlock: file_id=%s decision=legacy_text reason=zero_target", att.FileID)
 		return BlockResult{Lines: []string{renderLegacyLine(att)}, Height: 1}
 	}
 
@@ -304,6 +321,7 @@ func (r *Renderer) RenderBlock(att Block, channel, ts string, availWidth, baseRo
 	}
 	url, suffix := imgpkg.PickThumb(imgThumbs, pixelTarget)
 	if url == "" {
+		debuglog.ImgRender("RenderBlock: file_id=%s decision=legacy_text reason=no_thumb_url", att.FileID)
 		return BlockResult{Lines: []string{renderLegacyLine(att)}, Height: 1}
 	}
 	key := att.FileID + "-" + suffix
@@ -320,30 +338,43 @@ func (r *Renderer) RenderBlock(att Block, channel, ts string, availWidth, baseRo
 	img, cached := r.ctx.Fetcher.Cached(key, pixelTarget)
 	if !cached {
 		if _, failed := r.failed[key]; failed {
+			debuglog.ImgRender("RenderBlock: key=%s decision=placeholder_failed", key)
 			return BlockResult{Lines: buildPlaceholder(att.Name, target), Height: target.Y, Hit: hit}
 		}
 		if _, inFlight := r.fetching[key]; inFlight {
+			debuglog.ImgRender("RenderBlock: key=%s decision=placeholder_in_flight", key)
 			return BlockResult{Lines: buildPlaceholder(att.Name, target), Height: target.Y, Hit: hit}
 		}
 		r.fetching[key] = struct{}{}
+		reqID := debuglog.NextReqID()
+		debuglog.ImgFetch("enqueue: key=%s url=%s panel=msgs channel=%s ts=%s req_id=%d fetching_set_size=%d",
+			key, url, channel, ts, reqID, len(r.fetching))
 		ctx := r.ctx // capture for the goroutine
 		go func() {
+			fetchStart := time.Now()
 			_, err := ctx.Fetcher.Fetch(context.Background(), imgpkg.FetchRequest{
 				Key:        key,
 				URL:        url,
 				Target:     pixelTarget,
 				CellTarget: target,
+				ReqID:      reqID,
 			})
 			if ctx.SendMsg == nil {
+				debuglog.ImgFetch("dispatch: key=%s req_id=%d total_ms=%d kind=skipped (SendMsg=nil)",
+					key, reqID, time.Since(fetchStart).Milliseconds())
 				return
 			}
 			if err != nil {
-				log.Printf("image fetch failed: key=%s url=%s err=%v", key, url, err)
-				ctx.SendMsg(ImageFailedMsg{Key: key})
+				debuglog.ImgFetch("dispatch: key=%s req_id=%d total_ms=%d kind=failed err=%v",
+					key, reqID, time.Since(fetchStart).Milliseconds(), err)
+				ctx.SendMsg(ImageFailedMsg{Key: key, ReqID: reqID})
 				return
 			}
-			ctx.SendMsg(ImageReadyMsg{Channel: channel, TS: ts, Key: key})
+			debuglog.ImgFetch("dispatch: key=%s req_id=%d total_ms=%d kind=ready",
+				key, reqID, time.Since(fetchStart).Milliseconds())
+			ctx.SendMsg(ImageReadyMsg{Channel: channel, TS: ts, Key: key, ReqID: reqID})
 		}()
+		debuglog.ImgRender("RenderBlock: key=%s decision=placeholder_spawned_fetch req_id=%d", key, reqID)
 		return BlockResult{Lines: buildPlaceholder(att.Name, target), Height: target.Y, Hit: hit}
 	}
 
@@ -361,6 +392,8 @@ func (r *Renderer) RenderBlock(att Block, channel, ts string, availWidth, baseRo
 		} else if pr.OnFlush != nil {
 			fl = []func(io.Writer) error{pr.OnFlush}
 		}
+		debuglog.ImgRender("RenderBlock: key=%s decision=prerendered proto=%v target=(%d,%d)",
+			key, r.ctx.Protocol, target.X, target.Y)
 		return BlockResult{Lines: pr.Lines, Flushes: fl, SixelRows: sxlMap, Height: target.Y, Hit: hit}
 	}
 
@@ -373,6 +406,8 @@ func (r *Renderer) RenderBlock(att Block, channel, ts string, availWidth, baseRo
 		if out.OnFlush != nil {
 			fl = []func(io.Writer) error{out.OnFlush}
 		}
+		debuglog.ImgRender("RenderBlock: key=%s decision=cached_kitty_slow target=(%d,%d)",
+			key, target.X, target.Y)
 		return BlockResult{Lines: out.Lines, Flushes: fl, Height: target.Y, Hit: hit}
 	}
 
@@ -391,6 +426,8 @@ func (r *Renderer) RenderBlock(att Block, channel, ts string, availWidth, baseRo
 	} else if out.OnFlush != nil {
 		fl = []func(io.Writer) error{out.OnFlush}
 	}
+	debuglog.ImgRender("RenderBlock: key=%s decision=cached_slow proto=%v target=(%d,%d)",
+		key, r.ctx.Protocol, target.X, target.Y)
 	return BlockResult{Lines: out.Lines, Flushes: fl, SixelRows: sxlMap, Height: target.Y, Hit: hit}
 }
 

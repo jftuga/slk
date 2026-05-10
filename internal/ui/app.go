@@ -22,6 +22,7 @@ import (
 	"golang.design/x/clipboard"
 	"github.com/gammons/slk/internal/cache"
 	"github.com/gammons/slk/internal/config"
+	"github.com/gammons/slk/internal/debuglog"
 	"github.com/gammons/slk/internal/emoji"
 	imgpkg "github.com/gammons/slk/internal/image"
 	"github.com/gammons/slk/internal/ui/channelfinder"
@@ -1401,6 +1402,8 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if a.channelCacheReader != nil {
 			cached = a.channelCacheReader(msg.ID)
 		}
+		debuglog.Cache("ChannelSelectedMsg: channel=%s name=%q cache_hit_count=%d",
+			msg.ID, msg.Name, len(cached))
 		if len(cached) > 0 {
 			a.messagepane.SetLoading(false)
 			a.messagepane.SetMessages(cached)
@@ -1419,12 +1422,30 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if a.channelFetcher != nil {
 			fetcher := a.channelFetcher
 			chID, chName := msg.ID, msg.Name
+			debuglog.Cache("ChannelSelectedMsg: channel=%s firing background network fetch", msg.ID)
 			cmds = append(cmds, func() tea.Msg {
 				return fetcher(chID, chName)
 			})
+		} else {
+			debuglog.Cache("ChannelSelectedMsg: channel=%s no channelFetcher wired", msg.ID)
 		}
 
 	case MessagesLoadedMsg:
+		// Distinguish the three cases of the fetcher's nil-vs-[] contract:
+		//   nil      → network failure, keep cached render
+		//   []       → channel is genuinely empty, replace with empty
+		//   non-empty → authoritative replace
+		var kind string
+		switch {
+		case msg.Messages == nil:
+			kind = "nil_keep_cache"
+		case len(msg.Messages) == 0:
+			kind = "empty_replace"
+		default:
+			kind = "full_replace"
+		}
+		debuglog.Cache("MessagesLoadedMsg: channel=%s active=%s kind=%s count=%d",
+			msg.ChannelID, a.activeChannelID, kind, len(msg.Messages))
 		if msg.ChannelID == a.activeChannelID {
 			a.messagepane.SetLoading(false)
 			a.messagepane.SetLastReadTS(msg.LastReadTS)
@@ -1439,6 +1460,8 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 
 	case OlderMessagesLoadedMsg:
+		debuglog.Cache("OlderMessagesLoadedMsg: channel=%s active=%s count=%d",
+			msg.ChannelID, a.activeChannelID, len(msg.Messages))
 		if msg.ChannelID == a.activeChannelID {
 			a.fetchingOlder = false
 			a.messagepane.SetLoading(false)
@@ -1446,6 +1469,8 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 
 	case imgrender.ImageReadyMsg:
+		debuglog.ImgFetch("recv: kind=ready channel=%s ts=%s key=%s req_id=%d",
+			msg.Channel, msg.TS, msg.Key, msg.ReqID)
 		// Image attachment finished downloading; invalidate the
 		// messages pane's render cache for the affected channel so the
 		// next View() picks up the cached bytes inline. Only the
@@ -1464,6 +1489,7 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 
 	case imgrender.ImageFailedMsg:
+		debuglog.ImgFetch("recv: kind=failed key=%s req_id=%d", msg.Key, msg.ReqID)
 		// Image attachment fetch hit a permanent failure (all auths
 		// exhausted, or some other terminal error). Clear the in-flight
 		// bit so a future cache invalidation doesn't keep retrying;
@@ -1539,7 +1565,11 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 
 	case NewMessageMsg:
+		debuglog.Cache("NewMessageMsg: channel=%s ts=%s thread_ts=%s active=%s",
+			msg.ChannelID, msg.Message.TS, msg.Message.ThreadTS, a.activeChannelID)
 		if msg.Message.IsEdited {
+			debuglog.Cache("NewMessageMsg: channel=%s ts=%s decision=skipped_edit_echo",
+				msg.ChannelID, msg.Message.TS)
 			// Edit echo: update existing message in place rather than
 			// appending. Gate on the active channel for the main pane
 			// and on the thread panel's channel for the thread cache —
@@ -1560,6 +1590,8 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// MessageSentMsg / ThreadReplySentMsg already updated the UI and
 		// scheduled side effects; redoing them here would double-render.
 		if a.isSelfSent(msg.Message.TS) {
+			debuglog.Cache("NewMessageMsg: channel=%s ts=%s decision=skipped_self_send",
+				msg.ChannelID, msg.Message.TS)
 			break
 		}
 		// Early-arrival suppression: if the WS echo for an slk-
@@ -1575,9 +1607,17 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// official Slack client while slk is open) do NOT update
 		// lastSelfSendByChannel, so they pass through this guard.
 		if msg.Message.UserID != "" && msg.Message.UserID == a.currentUserID && a.selfSendInFlight(msg.ChannelID) {
+			debuglog.Cache("NewMessageMsg: channel=%s ts=%s decision=skipped_self_send_in_flight",
+				msg.ChannelID, msg.Message.TS)
 			break
 		}
 		if msg.ChannelID == a.activeChannelID {
+			// "active_channel_no_unread_bump": message arrived for the
+			// currently-viewed channel, so it's appended to the message
+			// pane (not skipped) but no unread bump is applied — the
+			// user is actively reading.
+			debuglog.Cache("NewMessageMsg: channel=%s ts=%s decision=active_channel_no_unread_bump",
+				msg.ChannelID, msg.Message.TS)
 			// Route thread replies to the thread panel if it matches the open thread
 			if a.threadVisible && msg.Message.ThreadTS == a.threadPanel.ThreadTS() {
 				a.threadPanel.AddReply(msg.Message)
@@ -1603,7 +1643,12 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// Threads view tracks its own unread state separately.
 			isThreadReply := msg.Message.ThreadTS != "" && msg.Message.ThreadTS != msg.Message.TS
 			if !isThreadReply || msg.Message.Subtype == "thread_broadcast" {
+				debuglog.Cache("NewMessageMsg: channel=%s ts=%s decision=mark_unread",
+					msg.ChannelID, msg.Message.TS)
 				a.sidebar.MarkUnread(msg.ChannelID)
+			} else {
+				debuglog.Cache("NewMessageMsg: channel=%s ts=%s decision=skipped_thread_reply_inactive",
+					msg.ChannelID, msg.Message.TS)
 			}
 		}
 		// A thread reply (regardless of channel) may have changed the
@@ -1868,6 +1913,8 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		a.statusbar.SetConnectionState(statusbar.ConnectionState(msg.State))
 
 	case WSMessageDeletedMsg:
+		debuglog.Cache("WSMessageDeletedMsg: channel=%s ts=%s active=%s",
+			msg.ChannelID, msg.TS, a.activeChannelID)
 		if msg.ChannelID == a.activeChannelID {
 			a.messagepane.RemoveMessageByTS(msg.TS)
 		}
@@ -1905,6 +1952,8 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// API call completed. If err, optimistic update stays (could add status bar error later).
 
 	case ChannelMarkedReadMsg:
+		debuglog.Cache("ChannelMarkedReadMsg: channel=%s active=%s (optimistic clear)",
+			msg.ChannelID, a.activeChannelID)
 		a.sidebar.ClearUnread(msg.ChannelID)
 
 	case DMNameResolvedMsg:
@@ -5263,6 +5312,8 @@ func (a *App) beginEditOfSelected() tea.Cmd {
 // Idempotent: calling twice with the same values is a no-op past the
 // first one (the underlying setters short-circuit on equality).
 func (a *App) applyChannelMark(channelID, ts string, unreadCount int) {
+	debuglog.Cache("applyChannelMark: channel=%s ts=%s unread_count=%d active=%s",
+		channelID, ts, unreadCount, a.activeChannelID)
 	if channelID == a.activeChannelID {
 		a.messagepane.SetLastReadTS(ts)
 	}
@@ -5274,6 +5325,8 @@ func (a *App) applyChannelMark(channelID, ts string, unreadCount int) {
 // flip threads-view row); read=true means the thread is now read
 // (clear boundary + clear threads-view row).
 func (a *App) applyThreadMark(channelID, threadTS, ts string, read bool) {
+	debuglog.Cache("applyThreadMark: channel=%s thread_ts=%s ts=%s read=%v active=%s",
+		channelID, threadTS, ts, read, a.activeChannelID)
 	if a.threadVisible &&
 		a.threadPanel.ChannelID() == channelID &&
 		a.threadPanel.ThreadTS() == threadTS {

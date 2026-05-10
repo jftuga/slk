@@ -1,6 +1,10 @@
 package image
 
-import "strconv"
+import (
+	"strconv"
+
+	"github.com/gammons/slk/internal/debuglog"
+)
 
 // CellPixels returns the (width, height) of a terminal cell in pixels.
 // It honors $COLORTERM_CELL_WIDTH/$COLORTERM_CELL_HEIGHT, then attempts
@@ -12,14 +16,17 @@ import "strconv"
 func CellPixels(fd int) (pxW, pxH int) {
 	if w, ok := atoi(getenv("COLORTERM_CELL_WIDTH")); ok {
 		if h, ok := atoi(getenv("COLORTERM_CELL_HEIGHT")); ok {
+			debuglog.ImgRender("CellPixels: cell_w=%d cell_h=%d source=env_override", w, h)
 			return w, h
 		}
 	}
 	if fd >= 0 {
 		if w, h, ok := winsizePixels(fd); ok {
+			debuglog.ImgRender("CellPixels: cell_w=%d cell_h=%d source=ioctl fd=%d", w, h, fd)
 			return w, h
 		}
 	}
+	debuglog.ImgRender("CellPixels: cell_w=8 cell_h=16 source=fallback (no env, no ioctl)")
 	return 8, 16
 }
 

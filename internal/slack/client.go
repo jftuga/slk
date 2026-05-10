@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"log"
 	"net/http"
 	"net/http/cookiejar"
 	"net/url"
@@ -13,6 +12,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/gammons/slk/internal/debuglog"
 	"github.com/gammons/slk/internal/slack/mrkdwn"
 	"github.com/gorilla/websocket"
 	"github.com/slack-go/slack"
@@ -966,10 +966,8 @@ func (c *Client) GetMutedChannels(ctx context.Context) ([]string, error) {
 	for _, id := range ParseMutedFromAllNotificationsPrefs(parsed.Prefs.AllNotificationPrefs) {
 		merged[id] = true
 	}
-	if debugWS {
-		log.Printf("[users.prefs.get] muted_channels=%d all_notifications_prefs len=%d total muted=%d",
-			len(parsed.Prefs.MutedChannels), len(parsed.Prefs.AllNotificationPrefs), len(merged))
-	}
+	debuglog.WS("users.prefs.get: muted_channels=%d all_notifications_prefs_len=%d total_muted=%d",
+		len(parsed.Prefs.MutedChannels), len(parsed.Prefs.AllNotificationPrefs), len(merged))
 	out := make([]string, 0, len(merged))
 	for id := range merged {
 		out = append(out, id)

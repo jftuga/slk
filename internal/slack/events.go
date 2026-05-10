@@ -2,20 +2,12 @@ package slackclient
 
 import (
 	"encoding/json"
-	"log"
-	"os"
 	"strings"
 	"time"
 
+	"github.com/gammons/slk/internal/debuglog"
 	"github.com/slack-go/slack"
 )
-
-// debugWS is true when SLK_DEBUG_WS is set. When enabled, dispatchWebSocketEvent
-// logs every unknown WebSocket event type (with a truncated payload) to the
-// standard logger — useful for reverse-engineering undocumented Slack events
-// such as sidebar-section updates. Pair with SLK_DEBUG=1 to route logs to
-// /tmp/slk-debug.log.
-var debugWS = os.Getenv("SLK_DEBUG_WS") != ""
 
 // EventHandler processes real-time events from Slack.
 type EventHandler interface {
@@ -252,12 +244,17 @@ func dispatchWebSocketEvent(data []byte, handler EventHandler) {
 			// label it. file_share is a regular message that has one
 			// or more files attached (Slack's V2 upload flow uses
 			// this subtype).
+			debuglog.WS("message: channel=%s user=%s ts=%s subtype=%q thread_ts=%s files=%d",
+				msg.Channel, msg.User, msg.TS, msg.SubType, msg.ThreadTS, len(msg.Files))
 			handler.OnMessage(msg.Channel, msg.User, msg.TS, msg.Text, msg.ThreadTS, msg.SubType, false, msg.Files, msg.Blocks, msg.Attachments)
 		case "message_changed":
 			if msg.Message != nil {
+				debuglog.WS("message_changed: channel=%s user=%s ts=%s thread_ts=%s edited=true",
+					msg.Channel, msg.Message.User, msg.Message.TS, msg.Message.ThreadTS)
 				handler.OnMessage(msg.Channel, msg.Message.User, msg.Message.TS, msg.Message.Text, msg.Message.ThreadTS, "", true, msg.Message.Files, msg.Message.Blocks, msg.Message.Attachments)
 			}
 		case "message_deleted":
+			debuglog.WS("message_deleted: channel=%s deleted_ts=%s", msg.Channel, msg.DeletedTS)
 			handler.OnMessageDeleted(msg.Channel, msg.DeletedTS)
 		}
 
@@ -266,6 +263,8 @@ func dispatchWebSocketEvent(data []byte, handler EventHandler) {
 		if err := json.Unmarshal(data, &evt); err != nil {
 			return
 		}
+		debuglog.WS("reaction_added: channel=%s ts=%s user=%s emoji=%q",
+			evt.Item.Channel, evt.Item.TS, evt.User, evt.Reaction)
 		handler.OnReactionAdded(evt.Item.Channel, evt.Item.TS, evt.User, evt.Reaction)
 
 	case "reaction_removed":
@@ -273,6 +272,8 @@ func dispatchWebSocketEvent(data []byte, handler EventHandler) {
 		if err := json.Unmarshal(data, &evt); err != nil {
 			return
 		}
+		debuglog.WS("reaction_removed: channel=%s ts=%s user=%s emoji=%q",
+			evt.Item.Channel, evt.Item.TS, evt.User, evt.Reaction)
 		handler.OnReactionRemoved(evt.Item.Channel, evt.Item.TS, evt.User, evt.Reaction)
 
 	case "presence_change":
@@ -302,6 +303,8 @@ func dispatchWebSocketEvent(data []byte, handler EventHandler) {
 		if err := json.Unmarshal(data, &evt); err != nil {
 			return
 		}
+		debuglog.WS("%s: channel=%s ts=%s unread_count=%d",
+			evt.Type, evt.Channel, evt.TS, evt.UnreadCountDisplay)
 		handler.OnChannelMarked(evt.Channel, evt.TS, evt.UnreadCountDisplay)
 
 	case "mpim_open", "im_created", "im_open", "group_joined", "channel_joined":
@@ -321,6 +324,8 @@ func dispatchWebSocketEvent(data []byte, handler EventHandler) {
 		// active=true means subscribed-for-unread, i.e. the thread is
 		// now unread. Invert for the read flag we hand to the handler.
 		read := !evt.Subscription.Active
+		debuglog.WS("thread_marked: channel=%s thread_ts=%s last_read=%s read=%v",
+			evt.Subscription.Channel, evt.Subscription.ThreadTS, evt.Subscription.LastRead, read)
 		handler.OnThreadMarked(evt.Subscription.Channel, evt.Subscription.ThreadTS, evt.Subscription.LastRead, read)
 
 	case "user_typing":
@@ -366,21 +371,22 @@ func dispatchWebSocketEvent(data []byte, handler EventHandler) {
 		handler.OnPrefChange(evt.Name, evt.stringValue())
 
 	case "hello":
+		debuglog.WS("hello: connected")
 		handler.OnConnect()
 
 	case "reconnect_url":
 		// Could store for reconnection; ignoring for now
 
 	default:
-		// Ignore other event types. When SLK_DEBUG_WS is set, dump them
-		// to the debug log so we can reverse-engineer undocumented
+		// Ignore other event types. When debug logging is on, dump them
+		// to the [ws] category so we can reverse-engineer undocumented
 		// events (e.g. sidebar-section updates).
-		if debugWS {
+		if debuglog.Enabled() {
 			payload := data
 			if len(payload) > 4096 {
 				payload = payload[:4096]
 			}
-			log.Printf("[ws] unknown event type=%q raw=%s", evt.Type, string(payload))
+			debuglog.WS("unknown event type=%q raw=%s", evt.Type, string(payload))
 		}
 	}
 }

@@ -64,6 +64,15 @@ slk --add-workspace
 
 Full walkthrough: [Setup wiki page](https://github.com/gammons/slk/wiki/Setup).
 
+## Debugging
+
+Set `SLK_DEBUG=1` to enable a comprehensive debug log written to
+`slk-debug.log` in the current working directory. The file is
+**truncated each run**, so reproduce the issue, quit slk, then copy
+the file before relaunching. Log lines are categorized
+(`[cache]`, `[imgfetch]`, `[imgrender]`, `[ws]`, `[general]`) so
+`grep '\[cache\]' slk-debug.log` slices to one focus area.
+
 ## Documentation
 
 Everything lives in the [**wiki**](https://github.com/gammons/slk/wiki):

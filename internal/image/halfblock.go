@@ -6,6 +6,7 @@ import (
 	"image/color"
 	"strings"
 
+	"github.com/gammons/slk/internal/debuglog"
 	"golang.org/x/image/draw"
 )
 
@@ -16,8 +17,11 @@ type HalfBlockRenderer struct{}
 // Render satisfies the Renderer interface.
 func (HalfBlockRenderer) Render(img image.Image, target image.Point) Render {
 	if target.X <= 0 || target.Y <= 0 {
+		debuglog.ImgRender("halfblock.Render: target=(%d,%d) abort=zero_target", target.X, target.Y)
 		return Render{Cells: target}
 	}
+	debuglog.ImgRender("halfblock.Render: target=(%d,%d) source_bounds=%v",
+		target.X, target.Y, img.Bounds())
 	pxW, pxH := target.X, target.Y*2
 	resized := image.NewRGBA(image.Rect(0, 0, pxW, pxH))
 	draw.BiLinear.Scale(resized, resized.Bounds(), img, img.Bounds(), draw.Over, nil)

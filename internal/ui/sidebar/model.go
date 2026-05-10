@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"charm.land/lipgloss/v2"
+	"github.com/gammons/slk/internal/debuglog"
 	"github.com/gammons/slk/internal/ui/messages"
 	"github.com/gammons/slk/internal/ui/styles"
 	kyoemoji "github.com/kyokomi/emoji/v2"
@@ -718,7 +719,10 @@ func (m *Model) VisibleItems() []ChannelItem {
 func (m *Model) MarkUnread(channelID string) {
 	for i := range m.items {
 		if m.items[i].ID == channelID {
+			before := m.items[i].UnreadCount
 			m.items[i].UnreadCount++
+			debuglog.Cache("sidebar.MarkUnread: channel=%s name=%q before=%d after=%d muted=%v",
+				channelID, m.items[i].Name, before, m.items[i].UnreadCount, m.items[i].IsMuted)
 			m.rebuildFilter()
 			m.rebuildNavPreserveCursor()
 			m.cacheValid = false
@@ -732,6 +736,9 @@ func (m *Model) MarkUnread(channelID string) {
 func (m *Model) ClearUnread(channelID string) {
 	for i := range m.items {
 		if m.items[i].ID == channelID {
+			before := m.items[i].UnreadCount
+			debuglog.Cache("sidebar.ClearUnread: channel=%s name=%q before=%d after=0 muted=%v",
+				channelID, m.items[i].Name, before, m.items[i].IsMuted)
 			if m.items[i].UnreadCount != 0 {
 				m.items[i].UnreadCount = 0
 				m.cacheValid = false
@@ -754,6 +761,9 @@ func (m *Model) ClearUnread(channelID string) {
 func (m *Model) SetUnreadCount(channelID string, n int) {
 	for i := range m.items {
 		if m.items[i].ID == channelID {
+			before := m.items[i].UnreadCount
+			debuglog.Cache("sidebar.SetUnreadCount: channel=%s name=%q before=%d after=%d muted=%v",
+				channelID, m.items[i].Name, before, n, m.items[i].IsMuted)
 			if m.items[i].UnreadCount == n {
 				return
 			}

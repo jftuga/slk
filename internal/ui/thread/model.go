@@ -9,6 +9,7 @@ import (
 	"charm.land/bubbles/v2/viewport"
 	"charm.land/lipgloss/v2"
 	"github.com/charmbracelet/x/ansi"
+	"github.com/gammons/slk/internal/debuglog"
 	emojiutil "github.com/gammons/slk/internal/emoji"
 	emoji "github.com/kyokomi/emoji/v2"
 
@@ -316,9 +317,13 @@ func (m *Model) HasReply(ts string) bool {
 // renderer state stays in sync with the messages-pane renderer's.
 func (m *Model) HandleImageFailed(key string) {
 	if m.imgRenderer == nil {
+		debuglog.ImgFetch("thread.HandleImageFailed: thread_ts=%q key=%s SKIP (no renderer)",
+			m.threadTS, key)
 		return
 	}
-	m.imgRenderer.MarkFailed(key)
+	tracked := m.imgRenderer.MarkFailed(key)
+	debuglog.ImgFetch("thread.HandleImageFailed: thread_ts=%q key=%s was_in_flight=%v",
+		m.threadTS, key, tracked)
 }
 
 // ReplyCount returns the number of replies.
