@@ -1,6 +1,10 @@
 package cache
 
-import "fmt"
+import (
+	"fmt"
+
+	"github.com/gammons/slk/internal/debuglog"
+)
 
 type Message struct {
 	TS          string
@@ -37,8 +41,11 @@ func (db *DB) UpsertMessage(m Message) error {
 	`, m.TS, m.ChannelID, m.WorkspaceID, m.UserID, m.Text, m.ThreadTS,
 		m.ReplyCount, m.EditedAt, boolToInt(m.IsDeleted), m.RawJSON, m.CreatedAt, m.Subtype)
 	if err != nil {
+		debuglog.Cache("UpsertMessage: channel=%s ts=%s ERR=%v", m.ChannelID, m.TS, err)
 		return fmt.Errorf("upserting message: %w", err)
 	}
+	debuglog.Cache("UpsertMessage: channel=%s ts=%s thread_ts=%s subtype=%q deleted=%v edited=%q",
+		m.ChannelID, m.TS, m.ThreadTS, m.Subtype, m.IsDeleted, m.EditedAt)
 	return nil
 }
 
@@ -88,8 +95,10 @@ func (db *DB) GetThreadReplies(channelID, threadTS string) ([]Message, error) {
 func (db *DB) DeleteMessage(channelID, ts string) error {
 	_, err := db.conn.Exec(`UPDATE messages SET is_deleted = 1 WHERE channel_id = ? AND ts = ?`, channelID, ts)
 	if err != nil {
+		debuglog.Cache("DeleteMessage: channel=%s ts=%s ERR=%v", channelID, ts, err)
 		return fmt.Errorf("deleting message: %w", err)
 	}
+	debuglog.Cache("DeleteMessage: channel=%s ts=%s", channelID, ts)
 	return nil
 }
 
