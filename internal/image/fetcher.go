@@ -212,18 +212,33 @@ func prerenderKey(key string, cellTarget image.Point, proto Protocol) string {
 // Cross-key concurrency is bounded; if the limit is full, additional
 // callers wait until a slot frees up or ctx is canceled.
 func (f *Fetcher) Fetch(ctx context.Context, req FetchRequest) (FetchResult, error) {
-	v, err, _ := f.sf.Do(req.Key, func() (any, error) {
+	leader := false
+	v, err, shared := f.sf.Do(req.Key, func() (any, error) {
+		leader = true
+		debuglog.ImgFetch("sf-leader: key=%s req_id=%d", req.Key, req.ReqID)
 		// Cache-only path doesn't need an HTTP slot; check first.
 		if _, hit := f.cache.Get(req.Key); !hit {
+			semStart := time.Now()
 			select {
 			case f.sem <- struct{}{}:
+				debuglog.ImgFetch("sem-acquire: key=%s req_id=%d wait_ms=%d",
+					req.Key, req.ReqID, time.Since(semStart).Milliseconds())
 				defer func() { <-f.sem }()
 			case <-ctx.Done():
+				debuglog.ImgFetch("sem-cancel: key=%s req_id=%d wait_ms=%d err=%v",
+					req.Key, req.ReqID, time.Since(semStart).Milliseconds(), ctx.Err())
 				return FetchResult{}, ctx.Err()
 			}
+		} else {
+			debuglog.ImgFetch("sem-skip: key=%s req_id=%d (disk cache hit, no HTTP needed)",
+				req.Key, req.ReqID)
 		}
 		return f.fetchInner(ctx, req)
 	})
+	if !leader {
+		debuglog.ImgFetch("sf-join: key=%s req_id=%d shared=%v leader=false",
+			req.Key, req.ReqID, shared)
+	}
 	if err != nil {
 		return FetchResult{}, err
 	}
@@ -232,24 +247,38 @@ func (f *Fetcher) Fetch(ctx context.Context, req FetchRequest) (FetchResult, err
 
 func (f *Fetcher) fetchInner(ctx context.Context, req FetchRequest) (FetchResult, error) {
 	path, hit := f.cache.Get(req.Key)
+	diskResult := "miss"
+	if hit {
+		diskResult = "hit"
+	}
+	debuglog.ImgFetch("disk-cache: key=%s req_id=%d result=%s", req.Key, req.ReqID, diskResult)
 	if !hit {
+		dlStart := time.Now()
 		body, ct, err := f.download(ctx, req.URL)
 		if err != nil {
+			debuglog.ImgFetch("download-err: key=%s req_id=%d dur_ms=%d err=%v",
+				req.Key, req.ReqID, time.Since(dlStart).Milliseconds(), err)
 			return FetchResult{}, err
 		}
+		debuglog.ImgFetch("download-ok: key=%s req_id=%d dur_ms=%d bytes=%d ct=%s",
+			req.Key, req.ReqID, time.Since(dlStart).Milliseconds(), len(body), ct)
 		ext := extFromMime(ct, req.URL)
 		path, err = f.cache.Put(req.Key, ext, body)
 		if err != nil {
+			debuglog.ImgFetch("cache-put-err: key=%s req_id=%d err=%v", req.Key, req.ReqID, err)
 			return FetchResult{}, err
 		}
 	}
 
 	file, err := os.Open(path)
 	if err != nil {
+		debuglog.ImgFetch("open-err: key=%s req_id=%d path=%s err=%v",
+			req.Key, req.ReqID, path, err)
 		return FetchResult{}, err
 	}
 	defer file.Close()
 
+	decStart := time.Now()
 	img, _, err := image.Decode(file)
 	if err != nil {
 		// Cache poisoning recovery: a previously persisted file isn't
@@ -258,8 +287,14 @@ func (f *Fetcher) fetchInner(ctx context.Context, req FetchRequest) (FetchResult
 		// re-downloads with the now-correct credentials.
 		file.Close()
 		f.cache.Delete(req.Key)
+		debuglog.ImgFetch("decode-err: key=%s req_id=%d path=%s err=%v (cache evicted)",
+			req.Key, req.ReqID, path, err)
 		return FetchResult{}, fmt.Errorf("decode %s: %w (cache evicted)", path, err)
 	}
+	bounds := img.Bounds()
+	debuglog.ImgFetch("decode: key=%s req_id=%d dur_ms=%d dims=(%d,%d)",
+		req.Key, req.ReqID, time.Since(decStart).Milliseconds(),
+		bounds.Dx(), bounds.Dy())
 
 	if req.Target.X > 0 && req.Target.Y > 0 {
 		img = downscale(img, req.Target)
@@ -275,7 +310,11 @@ func (f *Fetcher) fetchInner(ctx context.Context, req FetchRequest) (FetchResult
 	// Eagerly run protocol encoding off the UI thread so the next
 	// View() doesn't have to. Skipped when not configured or when
 	// CellTarget is zero (e.g., avatars and full-screen preview).
+	prStart := time.Now()
 	f.maybePrerender(req.Key, img, req.CellTarget)
+	debuglog.ImgFetch("prerender: key=%s req_id=%d cell_target=(%d,%d) dur_ms=%d",
+		req.Key, req.ReqID, req.CellTarget.X, req.CellTarget.Y,
+		time.Since(prStart).Milliseconds())
 
 	mime := mimeFromExt(filepath.Ext(path))
 	return FetchResult{Img: img, Source: path, Mime: mime}, nil
@@ -426,6 +465,9 @@ func (f *Fetcher) tryDownloadWithBackoff(ctx context.Context, url string, auth T
 // Body is nil for non-200 responses; caller decides whether to treat
 // them as terminal or retry.
 func (f *Fetcher) tryDownload(ctx context.Context, url string, auth TeamAuth) ([]byte, string, int, error) {
+	httpStart := time.Now()
+	debuglog.ImgFetch("http-try: url=%s auth_team=%q has_token=%v",
+		url, auth.TeamID, auth.Token != "")
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		return nil, "", 0, err
@@ -441,6 +483,8 @@ func (f *Fetcher) tryDownload(ctx context.Context, url string, auth TeamAuth) ([
 	}
 	resp, err := f.http.Do(httpReq)
 	if err != nil {
+		debuglog.ImgFetch("http-result: url=%s dur_ms=%d transport_err=%v",
+			url, time.Since(httpStart).Milliseconds(), err)
 		return nil, "", 0, fmt.Errorf("fetch %s: %w", url, err)
 	}
 	defer resp.Body.Close()
@@ -448,12 +492,18 @@ func (f *Fetcher) tryDownload(ctx context.Context, url string, auth TeamAuth) ([
 	if resp.StatusCode != http.StatusOK {
 		// Drain body for connection reuse, but we don't return it.
 		_, _ = io.Copy(io.Discard, resp.Body)
+		debuglog.ImgFetch("http-result: url=%s status=%d ct=%q dur_ms=%d body_drained",
+			url, resp.StatusCode, ct, time.Since(httpStart).Milliseconds())
 		return nil, ct, resp.StatusCode, nil
 	}
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
+		debuglog.ImgFetch("http-result: url=%s status=%d ct=%q dur_ms=%d body_read_err=%v",
+			url, resp.StatusCode, ct, time.Since(httpStart).Milliseconds(), err)
 		return nil, ct, resp.StatusCode, err
 	}
+	debuglog.ImgFetch("http-result: url=%s status=%d ct=%q dur_ms=%d bytes=%d",
+		url, resp.StatusCode, ct, time.Since(httpStart).Milliseconds(), len(body))
 	return body, ct, resp.StatusCode, nil
 }
 
