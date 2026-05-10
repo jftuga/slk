@@ -669,9 +669,16 @@ type App struct {
 	activeTeamID    string // workspace whose data is currently loaded into the side panels
 
 	// Callbacks
-	channelFetcher       ChannelFetchFunc
-	channelCacheReader   ChannelCacheReadFunc
-	olderMessagesFetcher OlderMessagesFetchFunc
+	channelFetcher     ChannelFetchFunc
+	channelCacheReader ChannelCacheReadFunc
+	// channelSyncedAtReader returns the unix timestamp (seconds) at which
+	// the channel's cache was last authoritatively replaced from the
+	// network, or 0 if never. Used by ChannelSelectedMsg's three-tier
+	// dispatch to decide between cache-only, cache-and-verify, and
+	// spinner-only render. Nil reader defaults to 0 (spinner-only tier
+	// always).
+	channelSyncedAtReader func(channelID string) int64
+	olderMessagesFetcher  OlderMessagesFetchFunc
 	messageSender        MessageSendFunc
 	messageEditor        MessageEditFunc
 	messageDeleter       MessageDeleteFunc
@@ -3946,6 +3953,12 @@ func (a *App) SetChannelFetcher(fn ChannelFetchFunc) {
 // completes. Pass nil to disable cache-first rendering.
 func (a *App) SetChannelCacheReader(fn ChannelCacheReadFunc) {
 	a.channelCacheReader = fn
+}
+
+// SetChannelSyncedAtReader installs the cache-freshness reader. Wired
+// in cmd/slk/main.go's wireCallbacks to db.GetChannelSyncedAt.
+func (a *App) SetChannelSyncedAtReader(fn func(channelID string) int64) {
+	a.channelSyncedAtReader = fn
 }
 
 // SetOlderMessagesFetcher sets the callback used to load older messages when scrolling up.
