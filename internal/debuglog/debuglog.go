@@ -38,6 +38,14 @@ var (
 // global stdlib log to io.Discard (so spurious log.Printf calls don't
 // bleed into the user's altscreen TUI) and returns nil, nil.
 //
+// Concurrency contract: Init MUST be called from main before any
+// goroutine that may call a category function. The package-level
+// `logger` var is published here without a mutex on the assumption
+// that goroutine-creation happens-before from main's sequential
+// execution makes it visible to all later-spawned workers. Calling
+// Init from a goroutine that races with category-function readers
+// would be a data race.
+//
 // Returns the *os.File so the caller can close it on exit. Idempotent
 // modulo the underlying file handle: calling Init twice with SLK_DEBUG
 // set will truncate the file twice and return the second handle (the
