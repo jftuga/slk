@@ -110,3 +110,42 @@ func TestSubtypeMigrationOnPreExistingDB(t *testing.T) {
 	}
 	db2.Close()
 }
+
+func TestMigrateAddsChannelsSyncedAtColumn(t *testing.T) {
+	db, err := New(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	// Probe PRAGMA table_info for the synced_at column on channels.
+	rows, err := db.conn.Query("PRAGMA table_info(channels)")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+
+	var found bool
+	for rows.Next() {
+		var cid int
+		var name, ctype string
+		var notnull, pk int
+		var dflt interface{}
+		if err := rows.Scan(&cid, &name, &ctype, &notnull, &dflt, &pk); err != nil {
+			t.Fatal(err)
+		}
+		if name == "synced_at" {
+			if ctype != "INTEGER" {
+				t.Errorf("synced_at type = %q, want INTEGER", ctype)
+			}
+			if notnull != 1 {
+				t.Error("synced_at should be NOT NULL")
+			}
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Error("channels table missing synced_at column")
+	}
+}

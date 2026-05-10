@@ -149,6 +149,10 @@ func (db *DB) migrate() error {
 		"ALTER TABLE users ADD COLUMN is_bot INTEGER NOT NULL DEFAULT 0"); err != nil {
 		return err
 	}
+	if err := db.addColumnIfMissing("channels", "synced_at",
+		"ALTER TABLE channels ADD COLUMN synced_at INTEGER NOT NULL DEFAULT 0"); err != nil {
+		return err
+	}
 
 	return nil
 }
