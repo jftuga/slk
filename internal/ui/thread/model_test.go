@@ -465,6 +465,9 @@ func TestThreadPatchUserName_UpdatesMatchingRowsAndUserNamesMap(t *testing.T) {
 
 	m.PatchUserName("U1", "bob")
 
+	if m.parent.UserName != "bob" {
+		t.Errorf("parent.UserName = %q, want bob", m.parent.UserName)
+	}
 	if m.replies[0].UserName != "bob" {
 		t.Errorf("replies[0].UserName = %q, want bob", m.replies[0].UserName)
 	}
@@ -518,9 +521,14 @@ func TestThreadPatchUserName_InvalidatesCacheEvenWithNoMatchingRows(t *testing.T
 		t.Fatal("expected cache populated after View(); harness assumption failed")
 	}
 
+	verBefore := m.userNamesV
+
 	m.PatchUserName("U99", "carol")
 
 	if m.cache != nil {
 		t.Error("PatchUserName should have invalidated m.cache so the mention re-resolves")
+	}
+	if m.userNamesV <= verBefore {
+		t.Errorf("userNamesV should bump after PatchUserName (chromeCache depends on it); before=%d after=%d", verBefore, m.userNamesV)
 	}
 }
