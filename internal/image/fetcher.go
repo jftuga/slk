@@ -608,6 +608,7 @@ type ThumbSpec struct {
 // suffix is a short string usable in cache keys (e.g. "720").
 func PickThumb(thumbs []ThumbSpec, target image.Point) (url, suffix string) {
 	if len(thumbs) == 0 {
+		debuglog.ImgRender("PickThumb: no thumbs available target=(%d,%d)", target.X, target.Y)
 		return "", ""
 	}
 	// Sort ascending by max(W, H).
@@ -616,11 +617,26 @@ func PickThumb(thumbs []ThumbSpec, target image.Point) (url, suffix string) {
 	sort.Slice(sorted, func(i, j int) bool {
 		return max(sorted[i].W, sorted[i].H) < max(sorted[j].W, sorted[j].H)
 	})
+	if debuglog.Enabled() {
+		var b strings.Builder
+		for i, t := range sorted {
+			if i > 0 {
+				b.WriteString(",")
+			}
+			fmt.Fprintf(&b, "(%dx%d)", t.W, t.H)
+		}
+		debuglog.ImgRender("PickThumb: target=(%d,%d) candidates=[%s]",
+			target.X, target.Y, b.String())
+	}
 	for _, t := range sorted {
 		if t.W >= target.X && t.H >= target.Y {
+			debuglog.ImgRender("PickThumb: chose=(%d,%d) suffix=%d url=%s",
+				t.W, t.H, max(t.W, t.H), t.URL)
 			return t.URL, fmt.Sprintf("%d", max(t.W, t.H))
 		}
 	}
 	last := sorted[len(sorted)-1]
+	debuglog.ImgRender("PickThumb: chose=(%d,%d) suffix=%d url=%s (fallback: largest, no candidate satisfied target)",
+		last.W, last.H, max(last.W, last.H), last.URL)
 	return last.URL, fmt.Sprintf("%d", max(last.W, last.H))
 }
