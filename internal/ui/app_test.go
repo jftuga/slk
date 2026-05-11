@@ -301,6 +301,145 @@ func TestHandleInsertMode_PlainEnterSends(t *testing.T) {
 	}
 }
 
+// TestHandleInsertMode_PlainEnterReturnsToNormalMode locks in the
+// vim-style UX: hitting Enter to submit a channel message drops the
+// user back to ModeNormal instead of leaving them in insert mode.
+func TestHandleInsertMode_PlainEnterReturnsToNormalMode(t *testing.T) {
+	app := NewApp()
+	app.activeChannelID = "C1"
+	app.focusedPanel = PanelMessages
+	app.SetMode(ModeInsert)
+	app.compose.SetValue("hello")
+
+	_ = app.handleInsertMode(tea.KeyPressMsg{Code: tea.KeyEnter})
+
+	if app.mode != ModeNormal {
+		t.Errorf("after plain-text send, mode = %v, want ModeNormal", app.mode)
+	}
+}
+
+// TestHandleInsertMode_ThreadReplyEnterReturnsToNormalMode is the
+// thread-compose counterpart: submitting a thread reply also returns
+// the user to ModeNormal.
+func TestHandleInsertMode_ThreadReplyEnterReturnsToNormalMode(t *testing.T) {
+	app := NewApp()
+	app.activeChannelID = "C1"
+	app.threadPanel.SetThread(messages.MessageItem{TS: "P1"}, nil, "C1", "P1")
+	app.threadVisible = true
+	app.focusedPanel = PanelThread
+	app.SetMode(ModeInsert)
+	app.threadCompose.SetValue("reply")
+
+	cmd := app.handleInsertMode(tea.KeyPressMsg{Code: tea.KeyEnter})
+
+	if cmd == nil {
+		t.Fatalf("plain Enter with text should return a send cmd")
+	}
+	if _, ok := cmd().(SendThreadReplyMsg); !ok {
+		t.Fatalf("expected SendThreadReplyMsg, got %T", cmd())
+	}
+	if app.mode != ModeNormal {
+		t.Errorf("after thread reply, mode = %v, want ModeNormal", app.mode)
+	}
+}
+
+// TestHandleInsertMode_AttachmentSendReturnsToNormalMode asserts the
+// mode flip happens immediately on Enter for attachment sends, not on
+// UploadResultMsg. The user's mental model is "I hit Enter, I'm done."
+func TestHandleInsertMode_AttachmentSendReturnsToNormalMode(t *testing.T) {
+	app := NewApp()
+	app.activeChannelID = "C1"
+	app.focusedPanel = PanelMessages
+	app.SetMode(ModeInsert)
+	app.compose.AddAttachment(compose.PendingAttachment{
+		Filename: "a.png", Bytes: []byte("png"), Size: 3,
+	})
+	app.SetUploader(func(channelID, threadTS, caption string, attachments []compose.PendingAttachment) tea.Cmd {
+		return func() tea.Msg { return UploadResultMsg{Err: nil} }
+	})
+
+	_ = app.handleInsertMode(tea.KeyPressMsg{Code: tea.KeyEnter})
+
+	if !app.compose.Uploading() {
+		t.Fatal("setup: expected uploader to have been invoked")
+	}
+	if app.mode != ModeNormal {
+		t.Errorf("after attachment send, mode = %v, want ModeNormal", app.mode)
+	}
+}
+
+// TestHandleInsertMode_ThreadAttachmentSendReturnsToNormalMode mirrors
+// the channel attachment test for the thread compose.
+func TestHandleInsertMode_ThreadAttachmentSendReturnsToNormalMode(t *testing.T) {
+	app := NewApp()
+	app.activeChannelID = "C1"
+	app.threadPanel.SetThread(messages.MessageItem{TS: "P1"}, nil, "C1", "P1")
+	app.threadVisible = true
+	app.focusedPanel = PanelThread
+	app.SetMode(ModeInsert)
+	app.threadCompose.AddAttachment(compose.PendingAttachment{
+		Filename: "a.png", Bytes: []byte("png"), Size: 3,
+	})
+	app.SetUploader(func(channelID, threadTS, caption string, attachments []compose.PendingAttachment) tea.Cmd {
+		return func() tea.Msg { return UploadResultMsg{Err: nil} }
+	})
+
+	_ = app.handleInsertMode(tea.KeyPressMsg{Code: tea.KeyEnter})
+
+	if !app.threadCompose.Uploading() {
+		t.Fatal("setup: expected uploader to have been invoked for thread compose")
+	}
+	if app.mode != ModeNormal {
+		t.Errorf("after thread attachment send, mode = %v, want ModeNormal", app.mode)
+	}
+}
+
+// TestHandleInsertMode_EditSubmitStaysInInsert pins down the
+// intentional asymmetry: edits keep insert mode until the server
+// confirms the edit (see MessageEditedMsg → cancelEdit), so that
+// transient failures don't strand the user one keystroke away from
+// resuming their edit.
+func TestHandleInsertMode_EditSubmitStaysInInsert(t *testing.T) {
+	app := NewApp()
+	app.activeChannelID = "C1"
+	app.focusedPanel = PanelMessages
+	app.SetMode(ModeInsert)
+	app.editing.active = true
+	app.editing.channelID = "C1"
+	app.editing.ts = "1.0"
+	app.editing.panel = PanelMessages
+	app.compose.SetValue("edited body")
+
+	cmd := app.handleInsertMode(tea.KeyPressMsg{Code: tea.KeyEnter})
+
+	if cmd == nil {
+		t.Fatal("expected submitEdit cmd")
+	}
+	if _, ok := cmd().(EditMessageMsg); !ok {
+		t.Fatalf("expected EditMessageMsg, got %T", cmd())
+	}
+	if app.mode != ModeInsert {
+		t.Errorf("edit submit changed mode to %v, want ModeInsert (cancelEdit on MessageEditedMsg drives the flip)", app.mode)
+	}
+}
+
+// TestHandleInsertMode_EmptyEnterStaysInInsert: pressing Enter with
+// nothing typed is a no-op — no message goes out, so the mode flip
+// would be surprising.
+func TestHandleInsertMode_EmptyEnterStaysInInsert(t *testing.T) {
+	app := NewApp()
+	app.activeChannelID = "C1"
+	app.focusedPanel = PanelMessages
+	app.SetMode(ModeInsert)
+	// compose has empty value
+
+	_ = app.handleInsertMode(tea.KeyPressMsg{Code: tea.KeyEnter})
+
+	if app.mode != ModeInsert {
+		t.Errorf("empty Enter changed mode to %v, want ModeInsert", app.mode)
+	}
+}
+
 func TestCopyPermalink_FromMessagesPane(t *testing.T) {
 	app := NewApp()
 	app.activeChannelID = "C123"

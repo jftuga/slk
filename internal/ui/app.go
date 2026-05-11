@@ -2875,7 +2875,11 @@ func (a *App) handleInsertMode(msg tea.KeyMsg) tea.Cmd {
 		}
 		if isSend {
 			if len(a.threadCompose.Attachments()) > 0 {
-				return a.submitWithAttachments(&a.threadCompose)
+				cmd := a.submitWithAttachments(&a.threadCompose)
+				if a.threadCompose.Uploading() {
+					a.exitInsertAfterSend()
+				}
+				return cmd
 			}
 			if a.editing.active && a.editing.panel == PanelThread {
 				return a.submitEdit(a.threadCompose.Value(), a.threadCompose.TranslateMentionsForSend(a.threadCompose.Value()))
@@ -2886,6 +2890,7 @@ func (a *App) handleInsertMode(msg tea.KeyMsg) tea.Cmd {
 				a.threadCompose.Reset()
 				threadTS := a.threadPanel.ThreadTS()
 				channelID := a.threadPanel.ChannelID()
+				a.exitInsertAfterSend()
 				return func() tea.Msg {
 					return SendThreadReplyMsg{
 						ChannelID: channelID,
@@ -2917,7 +2922,11 @@ func (a *App) handleInsertMode(msg tea.KeyMsg) tea.Cmd {
 	}
 	if isSend {
 		if len(a.compose.Attachments()) > 0 {
-			return a.submitWithAttachments(&a.compose)
+			cmd := a.submitWithAttachments(&a.compose)
+			if a.compose.Uploading() {
+				a.exitInsertAfterSend()
+			}
+			return cmd
 		}
 		if a.editing.active && a.editing.panel == PanelMessages {
 			return a.submitEdit(a.compose.Value(), a.compose.TranslateMentionsForSend(a.compose.Value()))
@@ -2926,6 +2935,7 @@ func (a *App) handleInsertMode(msg tea.KeyMsg) tea.Cmd {
 		if text != "" {
 			text = a.compose.TranslateMentionsForSend(text)
 			a.compose.Reset()
+			a.exitInsertAfterSend()
 			return func() tea.Msg {
 				return SendMessageMsg{
 					ChannelID: a.activeChannelID,
@@ -3697,6 +3707,20 @@ func (a *App) SetMode(mode Mode) {
 	}
 	a.mode = mode
 	a.statusbar.SetMode(mode)
+}
+
+// exitInsertAfterSend mirrors the Esc-from-insert handler so that
+// submitting a message returns the user to ModeNormal — matching the
+// vim convention where finishing an action drops you back to command
+// mode. Used by every send branch in handleInsertMode that actually
+// dispatches a message (plain-text and attachment, channel and
+// thread). Edits intentionally bypass this and instead exit insert
+// mode via cancelEdit on MessageEditedMsg, so a transient edit
+// failure doesn't strand the user one keystroke away from resuming.
+func (a *App) exitInsertAfterSend() {
+	a.SetMode(ModeNormal)
+	a.compose.Blur()
+	a.threadCompose.Blur()
 }
 
 // clearSelections drops any active mouse selection from both message
