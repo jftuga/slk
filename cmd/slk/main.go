@@ -1353,6 +1353,12 @@ func connectWorkspace(ctx context.Context, token slackclient.Token, db *cache.DB
 		if u.IsBot {
 			wctx.BotUserIDs[u.ID] = true
 		}
+		// Preload the avatar from the cached URL so the first render
+		// doesn't show empty avatar slots while the background
+		// client.GetUsers fetch races. Disk-cache hit avoids the network
+		// call in the common case. No-op when AvatarURL is empty (e.g.
+		// pre-AvatarURL-migration rows).
+		avatarCache.Preload(u.ID, u.AvatarURL)
 	}
 
 	// Construct the per-workspace async user resolver. wctx.UserNames
