@@ -91,56 +91,36 @@ If, during discovery, you find Slack uses a different field name (e.g. `entries`
 
 ---
 
-## Task 1: Endpoint discovery
+## Task 1: Endpoint discovery — DONE (notes file already present)
 
 **Files:**
-- Create: `docs/superpowers/notes/2026-05-12-subscriptions-thread-endpoint.md`
+- Reference: `docs/superpowers/notes/2026-05-12-subscriptions-thread-endpoint.md`
 
-This task is **manual** — performed by the human operator using the official Slack web client in a real browser. The agent's job is to wait for the operator to drop the discovery notes into the file, then verify the file is well-formed before unblocking the rest of the plan.
+Discovery was completed by the human operator during planning. The raw curl examples and full sample response were captured in the bottom of the spec file (`docs/superpowers/specs/2026-05-12-subscriptions-thread-design.md` lines 436–1825) and the distilled findings live in `docs/superpowers/notes/2026-05-12-subscriptions-thread-endpoint.md`. The key deltas from the speculative plan are summarised below — every later task that mentions endpoint names, request shape, or response field names refers to the notes file as ground truth.
 
-- [ ] **Step 1: Open the Threads view in the official Slack web client**
+### Discovery summary (load-bearing for later tasks)
 
-In a Chromium-based browser, open `https://app.slack.com/client/<TEAM_ID>/`. Open DevTools → Network tab. Filter by `subscriptions.thread`. Click the sidebar "Threads" link. Note every request whose path starts with `subscriptions.thread`. Expected candidates: `subscriptions.thread.list`, `subscriptions.thread.getView`, `subscriptions.thread.history`. Take a screenshot or copy the request URLs.
+- **Endpoint:** `subscriptions.thread.getView` (NOT `subscriptions.thread.list`).
+- **Pagination:** form field `current_ts` set to the previous response's top-level `max_ts`; terminated by `has_more: false`. There is **no** `response_metadata.next_cursor`.
+- **Response array field:** `threads` (NOT `subscriptions`). Each item is `{root_msg, latest_replies}`.
+- **Subscription state lives on `root_msg`:** `root_msg.channel`, `root_msg.thread_ts`, `root_msg.last_read`, `root_msg.subscribed`.
+- **`root_msg` is a complete message**, including `text`, `blocks`, `user`/`bot_id`/`bot_profile`. The plan's earlier "fetch parents for uncached threads" sub-phase is therefore unnecessary — Task 8 instead upserts `root_msg` into the `messages` table during the subscription phase.
+- **New WS event `thread_subscribed`** exists alongside `thread_marked`. Same `subscription` payload shape. The plan now adds a handler for it in Task 7, plus a defensive case for the hypothetical `thread_unsubscribed`.
+- **Inactive entries not observed** in the response; defensively filter on `root_msg.subscribed == true` in the adapter.
 
-- [ ] **Step 2: Capture one full request/response pair**
-
-For the request that returns the threads list (largest response body, contains an array of subscriptions), use DevTools → "Copy as cURL" → paste into a scratch file. Strip the cookie/token to placeholders so the notes file is safe to commit.
-
-- [ ] **Step 3: Trigger pagination if possible**
-
-If the response includes `response_metadata.next_cursor` with a non-empty value, scroll the threads view (or click "load more"); record the second-page request to confirm cursor field name and how it's threaded back through the form fields.
-
-- [ ] **Step 4: Trigger a subscribe/unsubscribe and record any WS events**
-
-In Slack, mark a thread as unread, then as read, then "unsubscribe" if available. Watch DevTools → Network → WS → frames for any event types other than `thread_marked`. Record them. Also tail `slk-debug.log` after exercising the same flows against slk and grep `\[ws\] unknown event` — note any new event types.
-
-- [ ] **Step 5: Write `docs/superpowers/notes/2026-05-12-subscriptions-thread-endpoint.md`**
-
-Fill in the template from the plan's "Discovery output document" section above. Every section must have a concrete value — no `TODO`, no `<paste here>`. The sample response must be a real (token-scrubbed) JSON blob, pretty-printed.
-
-- [ ] **Step 6: Verify the notes file is non-empty and contains the required sections**
-
-Run from the worktree root:
+- [ ] **Step 1: Verify the notes file is present and non-empty**
 
 ```
-test -s docs/superpowers/notes/2026-05-12-subscriptions-thread-endpoint.md && \
-grep -q '^## Endpoint$' docs/superpowers/notes/2026-05-12-subscriptions-thread-endpoint.md && \
-grep -q '^## Request form fields$' docs/superpowers/notes/2026-05-12-subscriptions-thread-endpoint.md && \
-grep -q '^## Pagination cursor location$' docs/superpowers/notes/2026-05-12-subscriptions-thread-endpoint.md && \
-grep -q '^## Response shape' docs/superpowers/notes/2026-05-12-subscriptions-thread-endpoint.md && \
-grep -q '^## Per-subscription item shape$' docs/superpowers/notes/2026-05-12-subscriptions-thread-endpoint.md && \
-grep -q '^## Inactive subscriptions in response?$' docs/superpowers/notes/2026-05-12-subscriptions-thread-endpoint.md && \
-grep -q '^## Sample full response' docs/superpowers/notes/2026-05-12-subscriptions-thread-endpoint.md && \
-echo OK
+test -s docs/superpowers/notes/2026-05-12-subscriptions-thread-endpoint.md && echo OK
 ```
 
-Expected output: `OK`.
+Expected: `OK`.
 
-- [ ] **Step 7: Commit**
+- [ ] **Step 2: Commit the notes file (already untracked in the worktree)**
 
 ```
 git add docs/superpowers/notes/2026-05-12-subscriptions-thread-endpoint.md
-git commit -m "docs: subscriptions.thread.list endpoint discovery notes"
+git commit -m "docs: subscriptions.thread.getView endpoint discovery notes"
 ```
 
 ---
@@ -1012,52 +992,48 @@ git commit -m "cache: ListSubscribedThreads driven by thread_subscriptions"
 - Modify: `internal/slack/client.go` (add method + JSON types; reuse the `postForm` and `truncateForLog` helpers already in the file at the bottom of the package).
 - Modify: `internal/slack/client_test.go` (add four tests).
 
-**Reference Task 1's notes file before writing any code.** If discovery found that the endpoint name is something other than `subscriptions.thread.list`, or that the cursor lives at a different JSON path, substitute the discovered values into both the implementation and the tests below. The structural shape of this task (one POST per page, loop until cursor is empty, hard cap, rate-limit retry) is independent of the field names.
+**Reference Task 1's notes file** (`docs/superpowers/notes/2026-05-12-subscriptions-thread-endpoint.md`). The concrete values for this implementation are:
 
-For the rest of this task description, the assumed-from-spec values are used as placeholders:
-- endpoint: `subscriptions.thread.list`
-- cursor path: `response_metadata.next_cursor`
-- response field name for the array: `subscriptions`
-- per-item fields: `channel`, `thread_ts`, `last_read`, `active`
+- **endpoint:** `subscriptions.thread.getView`
+- **pagination:** form field `current_ts` set to the previous response's top-level `max_ts`; terminated by `has_more: false`
+- **request form fields:** `limit=100`, `fetch_threads_state=true`, `priority_mode=all`, plus `current_ts=<prev max_ts>` on subsequent pages
+- **response array field:** `threads`
+- **per-item shape:** `{root_msg: {channel, thread_ts, last_read, subscribed, user, text, ...}, latest_replies: [...]}`
 
-- [ ] **Step 1: Re-read the discovery notes**
+The method should return both the subscription rows AND the raw `root_msg` payloads (so Task 8 can upsert them into the messages cache without a separate API call). Define a `ThreadSubscriptionView` struct that carries both, then a thin `ListThreadSubscriptions` method that returns `[]ThreadSubscriptionView`.
 
-```
-cat docs/superpowers/notes/2026-05-12-subscriptions-thread-endpoint.md
-```
-
-If any of the placeholder values above don't match what's in the notes file, substitute the real values throughout the rest of this task.
-
-- [ ] **Step 2: Write the failing tests**
+- [ ] **Step 1: Write the failing tests**
 
 Append to `internal/slack/client_test.go`:
 
 ```go
 func TestListThreadSubscriptions_PaginatesUntilExhausted(t *testing.T) {
 	var calls int
-	var capturedCursors []string
+	var capturedCurrentTS []string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		calls++
 		_ = r.ParseForm()
-		capturedCursors = append(capturedCursors, r.PostForm.Get("cursor"))
+		capturedCurrentTS = append(capturedCurrentTS, r.PostForm.Get("current_ts"))
 		w.Header().Set("Content-Type", "application/json")
 		switch calls {
 		case 1:
 			_, _ = w.Write([]byte(`{
 				"ok": true,
-				"subscriptions": [
-					{"channel": "C1", "thread_ts": "1700000000.000100", "last_read": "1700000000.000200", "active": true},
-					{"channel": "C2", "thread_ts": "1700000001.000100", "last_read": "1700000001.000200", "active": true}
+				"threads": [
+					{"root_msg": {"channel": "C1", "ts": "1700000000.000100", "thread_ts": "1700000000.000100", "last_read": "1700000000.000200", "subscribed": true, "user": "U2", "text": "p1"}},
+					{"root_msg": {"channel": "C2", "ts": "1700000001.000100", "thread_ts": "1700000001.000100", "last_read": "1700000001.000200", "subscribed": true, "user": "U3", "text": "p2"}}
 				],
-				"response_metadata": {"next_cursor": "P2"}
+				"has_more": true,
+				"max_ts": "1700000001.000100"
 			}`))
 		case 2:
 			_, _ = w.Write([]byte(`{
 				"ok": true,
-				"subscriptions": [
-					{"channel": "C3", "thread_ts": "1700000002.000100", "last_read": "1700000002.000200", "active": true}
+				"threads": [
+					{"root_msg": {"channel": "C3", "ts": "1700000002.000100", "thread_ts": "1700000002.000100", "last_read": "1700000002.000200", "subscribed": true, "user": "U4", "text": "p3"}}
 				],
-				"response_metadata": {"next_cursor": ""}
+				"has_more": false,
+				"max_ts": "1700000002.000100"
 			}`))
 		default:
 			t.Fatalf("unexpected call %d", calls)
@@ -1076,18 +1052,21 @@ func TestListThreadSubscriptions_PaginatesUntilExhausted(t *testing.T) {
 	if len(got) != 3 {
 		t.Errorf("len(got) = %d, want 3", len(got))
 	}
-	if got[0].ChannelID != "C1" || got[2].ChannelID != "C3" {
+	if got[0].Subscription.ChannelID != "C1" || got[2].Subscription.ChannelID != "C3" {
 		t.Errorf("got = %+v", got)
 	}
-	if capturedCursors[0] != "" || capturedCursors[1] != "P2" {
-		t.Errorf("cursors = %v", capturedCursors)
+	if got[0].RootMessage.Text != "p1" {
+		t.Errorf("expected root_msg.text to populate RootMessage.Text, got %+v", got[0].RootMessage)
+	}
+	if capturedCurrentTS[0] != "" || capturedCurrentTS[1] != "1700000001.000100" {
+		t.Errorf("current_ts = %v, want [\"\", \"1700000001.000100\"]", capturedCurrentTS)
 	}
 }
 
 func TestListThreadSubscriptions_EmptyResponse(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"ok": true, "subscriptions": [], "response_metadata": {"next_cursor": ""}}`))
+		_, _ = w.Write([]byte(`{"ok": true, "threads": [], "has_more": false, "max_ts": ""}`))
 	}))
 	defer srv.Close()
 
@@ -1102,22 +1081,22 @@ func TestListThreadSubscriptions_EmptyResponse(t *testing.T) {
 }
 
 func TestListThreadSubscriptions_RespectsHardCap(t *testing.T) {
-	// Server returns 100 subs per page with a perpetual next_cursor.
-	// The client should stop after the hard cap (1000) and never call
-	// the server an 11th time.
+	// Server returns 100 subs per page with has_more=true forever.
+	// The client should stop after the hard cap (1000) and never make
+	// an 11th call.
 	var calls int
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		calls++
 		w.Header().Set("Content-Type", "application/json")
 		var b []byte
-		b = append(b, []byte(`{"ok": true, "subscriptions": [`)...)
+		b = append(b, []byte(`{"ok": true, "threads": [`)...)
 		for i := 0; i < 100; i++ {
 			if i > 0 {
 				b = append(b, ',')
 			}
-			b = append(b, []byte(`{"channel": "C", "thread_ts": "1.0", "last_read": "1.0", "active": true}`)...)
+			b = append(b, []byte(`{"root_msg": {"channel": "C", "ts": "1.0", "thread_ts": "1.0", "last_read": "1.0", "subscribed": true, "user": "U"}}`)...)
 		}
-		b = append(b, []byte(`], "response_metadata": {"next_cursor": "more"}}`)...)
+		b = append(b, []byte(`], "has_more": true, "max_ts": "1.0"}`)...)
 		_, _ = w.Write(b)
 	}))
 	defer srv.Close()
@@ -1132,6 +1111,35 @@ func TestListThreadSubscriptions_RespectsHardCap(t *testing.T) {
 	}
 	if calls != 10 {
 		t.Errorf("calls = %d, want 10 (1000 / 100 per page)", calls)
+	}
+}
+
+func TestListThreadSubscriptions_FiltersUnsubscribedItems(t *testing.T) {
+	// Defensively drop any items the server marks as subscribed=false.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{
+			"ok": true,
+			"threads": [
+				{"root_msg": {"channel": "C1", "ts": "1.0", "thread_ts": "1.0", "last_read": "1.0", "subscribed": true}},
+				{"root_msg": {"channel": "C2", "ts": "2.0", "thread_ts": "2.0", "last_read": "2.0", "subscribed": false}}
+			],
+			"has_more": false,
+			"max_ts": ""
+		}`))
+	}))
+	defer srv.Close()
+
+	c := &Client{token: "xoxc-test", cookie: "d-cookie", apiBaseURL: srv.URL + "/api/"}
+	got, err := c.ListThreadSubscriptions(context.Background())
+	if err != nil {
+		t.Fatalf("ListThreadSubscriptions: %v", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("len(got) = %d, want 1 (unsubscribed filtered out)", len(got))
+	}
+	if got[0].Subscription.ChannelID != "C1" {
+		t.Errorf("wrong item survived filter: %+v", got[0])
 	}
 }
 
@@ -1153,9 +1161,9 @@ func TestListThreadSubscriptions_ReturnsErrorOnNotOK(t *testing.T) {
 }
 ```
 
-(If `strings` isn't already imported in `client_test.go`, the test build will demand it — leave the file to `goimports` / the editor; the existing tests already import `strings`.)
+(If `strings` isn't already imported in `client_test.go`, the existing test file already does — confirm and add if missing.)
 
-- [ ] **Step 3: Run tests, see fail**
+- [ ] **Step 2: Run tests, see fail**
 
 ```
 go test ./internal/slack/ -run TestListThreadSubscriptions -v
@@ -1163,16 +1171,15 @@ go test ./internal/slack/ -run TestListThreadSubscriptions -v
 
 Expected: FAIL — `undefined: c.ListThreadSubscriptions`.
 
-- [ ] **Step 4: Implement `ListThreadSubscriptions`**
+- [ ] **Step 3: Implement `ListThreadSubscriptions`**
 
-Append to `internal/slack/client.go`. Place near the other hand-rolled paginated endpoints (e.g. just below `GetChannelSections` and `callChannelSectionsList`). The cache-layer `ThreadSubscription` type lives in `internal/cache` and we don't want to depend on it from `internal/slack`, so this method returns its own `ThreadSubscription` value type owned by `internal/slack` — the caller (in `cmd/slk/reconnect_backfill.go`) is responsible for adapting it into `cache.ThreadSubscription` rows before passing to `Reconcile`.
+Append to `internal/slack/client.go`. Place near the other hand-rolled paginated endpoints (e.g. just below `GetChannelSections` / `callChannelSectionsList`). The method returns `[]ThreadSubscriptionView` where each view bundles the parsed `Subscription` row with the raw `root_msg` payload — the caller (Task 8) needs both: `Subscription` feeds `ReconcileThreadSubscriptions`, and `RootMessage` lets us pre-cache the parent without a separate `conversations.replies` call.
 
 ```go
-// ThreadSubscription is one entry returned by ListThreadSubscriptions.
-// Mirrors the JSON shape Slack ships in the subscriptions.thread.list
-// response. Active=true means "subscribed for unread updates";
-// Active=false rows may or may not appear depending on Slack's
-// server-side filter (see ListThreadSubscriptions docs).
+// ThreadSubscription is the slk-side projection of one subscribed
+// thread returned by subscriptions.thread.getView. The five fields
+// here map cleanly onto cache.ThreadSubscription. The caller in
+// cmd/slk/reconnect_backfill.go does the adapter cast.
 type ThreadSubscription struct {
 	ChannelID string
 	ThreadTS  string
@@ -1180,102 +1187,161 @@ type ThreadSubscription struct {
 	Active    bool
 }
 
+// ThreadSubscriptionView is one item from subscriptions.thread.getView.
+// It carries both the subscription-state projection (Subscription) and
+// the full parent message Slack ships inside root_msg
+// (RootMessage). The subscription-phase backfiller uses Subscription
+// to upsert the thread_subscriptions row and RootMessage to upsert
+// the parent into the messages cache, eliminating the need for a
+// follow-up conversations.replies fetch when the parent isn't
+// already cached.
+type ThreadSubscriptionView struct {
+	Subscription ThreadSubscription
+	RootMessage  slack.Message
+}
+
 // listThreadSubscriptionsResponse decodes one page of
-// subscriptions.thread.list. Field names match Slack's wire format —
-// rename here if Task 1 discovery found different names.
+// subscriptions.thread.getView. The wire shape is:
+//
+//	{
+//	  "ok": true,
+//	  "threads": [
+//	    {"root_msg": {channel, ts, thread_ts, last_read, subscribed, ...}, "latest_replies": [...]},
+//	    ...
+//	  ],
+//	  "has_more": true,
+//	  "max_ts": "1700000001.000100"
+//	}
 type listThreadSubscriptionsResponse struct {
-	OK            bool   `json:"ok"`
-	Error         string `json:"error"`
-	Subscriptions []struct {
-		Channel  string `json:"channel"`
-		ThreadTS string `json:"thread_ts"`
-		LastRead string `json:"last_read"`
-		Active   bool   `json:"active"`
-	} `json:"subscriptions"`
-	ResponseMetadata struct {
-		NextCursor string `json:"next_cursor"`
-	} `json:"response_metadata"`
+	OK      bool   `json:"ok"`
+	Error   string `json:"error"`
+	Threads []struct {
+		// RootMsg is decoded twice: once into the typed
+		// slackThreadRootMsg shape for the channel/last_read/subscribed
+		// fields we need, and once into a slack.Message via json.RawMessage
+		// so the caller can re-marshal it for the messages cache.
+		RootMsg json.RawMessage `json:"root_msg"`
+	} `json:"threads"`
+	HasMore bool   `json:"has_more"`
+	MaxTS   string `json:"max_ts"`
+}
+
+// slackThreadRootMsg is the subset of root_msg fields the
+// subscription-phase reconcile needs. The rest of root_msg flows
+// through as slack.Message via the raw JSON re-parse.
+type slackThreadRootMsg struct {
+	Channel    string `json:"channel"`
+	TS         string `json:"ts"`
+	ThreadTS   string `json:"thread_ts"`
+	LastRead   string `json:"last_read"`
+	Subscribed bool   `json:"subscribed"`
 }
 
 // listThreadSubscriptionsHardCap bounds how many subscriptions
 // ListThreadSubscriptions will return per call. Protects against
-// runaway requests if Slack ships a buggy cursor that never empties.
+// runaway requests if Slack ships a buggy has_more flag.
 const listThreadSubscriptionsHardCap = 1000
 
 // ListThreadSubscriptions fetches the workspace's full subscribed-
-// threads list via Slack's internal subscriptions.thread.list endpoint
-// (the same call the official web client makes when bootstrapping its
-// Threads view). Paginates via response_metadata.next_cursor and stops
-// at listThreadSubscriptionsHardCap subscriptions.
+// threads list via Slack's internal subscriptions.thread.getView
+// endpoint (the same call the official web client makes when
+// bootstrapping its Threads view). Paginates via the `current_ts`
+// form field (set to the previous response's max_ts), terminated by
+// has_more=false. Stops at listThreadSubscriptionsHardCap items.
 //
-// Returns (nil, err) on network failure, non-2xx response, or
-// ok=false JSON. Caller (the reconnect backfill phase) is expected
-// to treat any error as "subscriptions unavailable" and surface the
-// UI banner.
-func (c *Client) ListThreadSubscriptions(ctx context.Context) ([]ThreadSubscription, error) {
-	var all []ThreadSubscription
-	cursor := ""
+// Items where root_msg.subscribed is false are filtered out —
+// defensive, since the live endpoint hasn't been observed returning
+// them.
+//
+// Returns (nil, err) on network failure or ok=false JSON. The caller
+// (the reconnect backfill phase) treats any error as "subscriptions
+// unavailable" and surfaces the UI banner.
+func (c *Client) ListThreadSubscriptions(ctx context.Context) ([]ThreadSubscriptionView, error) {
+	var all []ThreadSubscriptionView
+	currentTS := ""
 	for {
-		body, err := c.callListThreadSubscriptions(ctx, cursor)
+		body, err := c.callListThreadSubscriptions(ctx, currentTS)
 		if err != nil {
 			return nil, err
 		}
 		var resp listThreadSubscriptionsResponse
 		if err := json.Unmarshal(body, &resp); err != nil {
-			return nil, fmt.Errorf("parsing subscriptions.thread.list: %w (body=%s)", err, truncateForLog(body))
+			return nil, fmt.Errorf("parsing subscriptions.thread.getView: %w (body=%s)", err, truncateForLog(body))
 		}
 		if !resp.OK {
-			return nil, fmt.Errorf("subscriptions.thread.list: %s (body=%s)", resp.Error, truncateForLog(body))
+			return nil, fmt.Errorf("subscriptions.thread.getView: %s (body=%s)", resp.Error, truncateForLog(body))
 		}
-		for _, sub := range resp.Subscriptions {
-			all = append(all, ThreadSubscription{
-				ChannelID: sub.Channel,
-				ThreadTS:  sub.ThreadTS,
-				LastRead:  sub.LastRead,
-				Active:    sub.Active,
+		for _, item := range resp.Threads {
+			var sm slackThreadRootMsg
+			if err := json.Unmarshal(item.RootMsg, &sm); err != nil {
+				// Skip malformed items but keep paginating.
+				debuglog.Backfill("ListThreadSubscriptions: skipping malformed root_msg: %v", err)
+				continue
+			}
+			if !sm.Subscribed {
+				continue
+			}
+			var raw slack.Message
+			if err := json.Unmarshal(item.RootMsg, &raw); err != nil {
+				// Couldn't decode the rich message; skip so we don't
+				// corrupt the messages cache, but the subscription row
+				// is still useful — fall back to a synthetic empty
+				// slack.Message so the caller can still record the row.
+				debuglog.Backfill("ListThreadSubscriptions: root_msg slack.Message decode err=%v; subscription kept without RootMessage", err)
+				raw = slack.Message{}
+			}
+			all = append(all, ThreadSubscriptionView{
+				Subscription: ThreadSubscription{
+					ChannelID: sm.Channel,
+					ThreadTS:  sm.ThreadTS,
+					LastRead:  sm.LastRead,
+					Active:    sm.Subscribed,
+				},
+				RootMessage: raw,
 			})
 			if len(all) >= listThreadSubscriptionsHardCap {
 				debuglog.Backfill("ListThreadSubscriptions: hit hard cap %d, stopping", listThreadSubscriptionsHardCap)
 				return all, nil
 			}
 		}
-		if resp.ResponseMetadata.NextCursor == "" || resp.ResponseMetadata.NextCursor == cursor {
+		if !resp.HasMore || resp.MaxTS == "" || resp.MaxTS == currentTS {
 			break
 		}
-		cursor = resp.ResponseMetadata.NextCursor
+		currentTS = resp.MaxTS
 	}
 	return all, nil
 }
 
-func (c *Client) callListThreadSubscriptions(ctx context.Context, cursor string) ([]byte, error) {
+func (c *Client) callListThreadSubscriptions(ctx context.Context, currentTS string) ([]byte, error) {
 	form := url.Values{}
-	if cursor != "" {
-		form.Set("cursor", cursor)
+	form.Set("limit", "100")
+	form.Set("fetch_threads_state", "true")
+	form.Set("priority_mode", "all")
+	if currentTS != "" {
+		form.Set("current_ts", currentTS)
 	}
-	// Request the largest reasonable page size to minimize round-trips.
-	// Slack accepts any value up to a server-side cap (~100 in practice).
-	form.Set("count", "100")
-	return c.postForm(ctx, "subscriptions.thread.list", form)
+	return c.postForm(ctx, "subscriptions.thread.getView", form)
 }
 ```
 
-You may also need to add `"github.com/gammons/slk/internal/debuglog"` to the imports of `internal/slack/client.go` if not already present. Check with:
+Imports to add to `internal/slack/client.go` if not already present:
+- `"github.com/gammons/slk/internal/debuglog"`
+
+Check with:
 
 ```
 grep '"github.com/gammons/slk/internal/debuglog"' internal/slack/client.go
 ```
 
-If missing, add it.
-
-- [ ] **Step 5: Run tests, see pass**
+- [ ] **Step 4: Run tests, see pass**
 
 ```
 go test ./internal/slack/ -run TestListThreadSubscriptions -v
 ```
 
-Expected: PASS for all four tests.
+Expected: PASS for all five tests.
 
-- [ ] **Step 6: Run full slack-package suite**
+- [ ] **Step 5: Run full slack-package suite**
 
 ```
 go test ./internal/slack/...
@@ -1283,22 +1349,29 @@ go test ./internal/slack/...
 
 Expected: PASS.
 
-- [ ] **Step 7: Commit**
+- [ ] **Step 6: Commit**
 
 ```
 git add internal/slack/client.go internal/slack/client_test.go
-git commit -m "slack: ListThreadSubscriptions with pagination + hard cap"
+git commit -m "slack: ListThreadSubscriptions via subscriptions.thread.getView"
 ```
 
 ---
 
-## Task 7: Extend `OnThreadMarked` to persist subscription state
+## Task 7: Extend WS event handlers to persist subscription state
 
 **Files:**
-- Modify: `cmd/slk/main.go` (the `OnThreadMarked` method on `rtmEventHandler`, currently at lines 2787-2801).
-- Modify: `cmd/slk/event_handler_test.go` (existing per-handler tests live here — same package `main`; mirrors the style of `TestOnConversationOpened_*` and `TestOnMessage_*`).
+- Modify: `internal/slack/events.go` (parse `thread_subscribed` and `thread_unsubscribed` events; add `OnThreadSubscriptionChanged` to the `EventHandler` interface; dispatch the events).
+- Modify: `cmd/slk/main.go` (extend `OnThreadMarked` to upsert; implement `OnThreadSubscriptionChanged`).
+- Modify: `cmd/slk/event_handler_test.go` (extends existing `OnConversationOpened` / `OnMessage` test patterns; `package main`; uses the `newTestDB` helper from `reconnect_backfill_test.go`).
 
-`active = !read` per the dispatch in `internal/slack/events.go:319-329`. Every WS `thread_marked` should result in an upsert to `thread_subscriptions` reflecting the new state.
+Per the discovery notes, Slack ships **two** WS events that mutate per-thread subscription state:
+
+1. `thread_marked` (already parsed; payload `subscription{channel,thread_ts,last_read,active}`) — fires on read/unread toggle.
+2. `thread_subscribed` (new; same `subscription{...}` payload shape) — fires when the user newly subscribes to a thread (via reply, mention, manual subscribe).
+3. `thread_unsubscribed` (hypothetical mirror of #2; not observed yet but plausibly exists) — handle defensively.
+
+Both events should call the same handler logic: upsert a `thread_subscriptions` row reflecting the new state. The existing `OnThreadMarked` handler stays focused on read-state UI side effects.
 
 - [ ] **Step 1: Find the existing `OnThreadMarked` test, if any**
 
@@ -1306,11 +1379,11 @@ git commit -m "slack: ListThreadSubscriptions with pagination + hard cap"
 grep -rn "OnThreadMarked" cmd/slk/
 ```
 
-If there's already a test (e.g. `TestOnThreadMarked_*`), extend it. If not, this task creates a new one.
+If none, this task creates `TestOnThreadMarked_UpsertsSubscription` and `TestOnThreadSubscriptionChanged_UpsertsSubscription`.
 
-- [ ] **Step 2: Write the failing test**
+- [ ] **Step 2: Write the failing tests**
 
-Add to `cmd/slk/event_handler_test.go` (existing file; `package main`; uses the same `newTestDB` helper from `reconnect_backfill_test.go`):
+Add to `cmd/slk/event_handler_test.go`:
 
 ```go
 func TestOnThreadMarked_UpsertsSubscription(t *testing.T) {
@@ -1319,12 +1392,12 @@ func TestOnThreadMarked_UpsertsSubscription(t *testing.T) {
 		db:          db,
 		workspaceID: "T1",
 		isActive:    func() bool { return true },
-		// program/notifier left nil; OnThreadMarked nil-checks before
+		// program/notifier left nil; the handler nil-checks before
 		// dispatching the UI message.
 	}
 
-	// Read=false means the thread is now unread (active=true in
-	// thread_subscriptions terms).
+	// read=false means the thread is now unread, which corresponds to
+	// active=true in thread_subscriptions.
 	h.OnThreadMarked("C1", "1700000100.000000", "1700000150.000000", false)
 
 	got, err := db.ListActiveThreadSubscriptions("T1")
@@ -1339,33 +1412,164 @@ func TestOnThreadMarked_UpsertsSubscription(t *testing.T) {
 		t.Fatalf("subscription row mismatch: %+v", got[0])
 	}
 
-	// Now mark read; the row should flip to inactive.
+	// Marking read flips the row to inactive (tombstone-style).
 	h.OnThreadMarked("C1", "1700000100.000000", "1700000150.000000", true)
 	got, _ = db.ListActiveThreadSubscriptions("T1")
 	if len(got) != 0 {
 		t.Fatalf("expected 0 active after read=true, got %d", len(got))
 	}
 }
+
+func TestOnThreadSubscriptionChanged_UpsertsActive(t *testing.T) {
+	db := newTestDB(t)
+	h := &rtmEventHandler{
+		db:          db,
+		workspaceID: "T1",
+		isActive:    func() bool { return true },
+	}
+
+	// A fresh thread_subscribed event with active=true.
+	h.OnThreadSubscriptionChanged("C1", "1700000100.000000", "1700000150.000000", true)
+
+	got, err := db.ListActiveThreadSubscriptions("T1")
+	if err != nil {
+		t.Fatalf("ListActiveThreadSubscriptions: %v", err)
+	}
+	if len(got) != 1 || got[0].ChannelID != "C1" || !got[0].Active {
+		t.Fatalf("subscription row mismatch: %+v", got)
+	}
+}
+
+func TestOnThreadSubscriptionChanged_TombstonesOnUnsubscribe(t *testing.T) {
+	db := newTestDB(t)
+	if err := db.UpsertThreadSubscription("T1", "C1", "1700000100.000000", "1700000150.000000", true); err != nil {
+		t.Fatalf("UpsertThreadSubscription: %v", err)
+	}
+	h := &rtmEventHandler{
+		db:          db,
+		workspaceID: "T1",
+		isActive:    func() bool { return true },
+	}
+
+	// Defensive: simulate the hypothetical thread_unsubscribed event by
+	// calling the handler with active=false.
+	h.OnThreadSubscriptionChanged("C1", "1700000100.000000", "1700000150.000000", false)
+
+	got, err := db.ListActiveThreadSubscriptions("T1")
+	if err != nil {
+		t.Fatalf("ListActiveThreadSubscriptions: %v", err)
+	}
+	if len(got) != 0 {
+		t.Fatalf("expected 0 active after unsubscribe, got %d: %+v", len(got), got)
+	}
+}
 ```
 
-(If `newTestDB` is in the same `package main` as the handler, this test can use it directly. Otherwise, copy the helper or extract it.)
-
-- [ ] **Step 3: Run test, see fail**
+- [ ] **Step 3: Run tests, see fail**
 
 ```
-go test ./cmd/slk/ -run TestOnThreadMarked_UpsertsSubscription -v
+go test ./cmd/slk/ -run 'TestOnThreadMarked_UpsertsSubscription|TestOnThreadSubscriptionChanged' -v
 ```
 
-Expected: FAIL — no thread_subscriptions row exists.
+Expected: FAIL — missing methods on `rtmEventHandler`.
 
-- [ ] **Step 4: Extend `OnThreadMarked`**
+- [ ] **Step 4: Add the new EventHandler method**
 
-In `cmd/slk/main.go`, replace the body of `func (h *rtmEventHandler) OnThreadMarked(...)`:
+In `internal/slack/events.go`, extend the `EventHandler` interface. Add this method alongside `OnThreadMarked`:
+
+```go
+// OnThreadSubscriptionChanged is delivered for thread_subscribed and
+// thread_unsubscribed WS events. active=true on subscribe,
+// active=false on unsubscribe. lastRead is the per-thread last_read ts
+// the server reports — pass-through to thread_subscriptions.last_read.
+// The payload shape is identical to thread_marked.subscription, so
+// implementations can share state-update logic with OnThreadMarked
+// (this handler is the persistence-only path; OnThreadMarked also
+// drives the UI's read-state side effects).
+OnThreadSubscriptionChanged(channelID, threadTS, lastRead string, active bool)
+```
+
+In `internal/slack/events.go`, add a parsing struct (right next to `wsThreadMarkedEvent`):
+
+```go
+// wsThreadSubscribedEvent represents thread_subscribed and
+// thread_unsubscribed events from Slack's browser-protocol
+// WebSocket. The subscription block has the same shape as
+// wsThreadMarkedEvent.subscription.
+type wsThreadSubscribedEvent struct {
+	Type         string `json:"type"`
+	Subscription struct {
+		Channel  string `json:"channel"`
+		ThreadTS string `json:"thread_ts"`
+		LastRead string `json:"last_read"`
+		Active   bool   `json:"active"`
+	} `json:"subscription"`
+}
+```
+
+In `dispatchWebSocketEvent`, add cases right after the `thread_marked` case:
+
+```go
+case "thread_subscribed", "thread_unsubscribed":
+	var evt wsThreadSubscribedEvent
+	if err := json.Unmarshal(data, &evt); err != nil {
+		return
+	}
+	// thread_unsubscribed events should be treated as active=false
+	// regardless of what the server marks the inner flag as; the
+	// outer event type is authoritative.
+	active := evt.Subscription.Active
+	if eventType == "thread_unsubscribed" {
+		active = false
+	}
+	debuglog.WS("%s: channel=%s thread_ts=%s last_read=%s active=%v",
+		eventType, evt.Subscription.Channel, evt.Subscription.ThreadTS, evt.Subscription.LastRead, active)
+	handler.OnThreadSubscriptionChanged(
+		evt.Subscription.Channel,
+		evt.Subscription.ThreadTS,
+		evt.Subscription.LastRead,
+		active,
+	)
+```
+
+(Confirm the variable name for the dispatched event type in the existing `switch` — it's the value being switched on; `eventType` here is illustrative.)
+
+- [ ] **Step 5: Update all `EventHandler` implementations**
+
+The compile error after adding the interface method will surface every implementation that needs an `OnThreadSubscriptionChanged`. The main one lives on `rtmEventHandler` in `cmd/slk/main.go`. Any test fakes for `EventHandler` (e.g. mock handlers in `internal/slack/*_test.go`) also need the no-op method.
+
+Add to `cmd/slk/main.go` (near `OnThreadMarked`):
+
+```go
+// OnThreadSubscriptionChanged persists a subscribe/unsubscribe event
+// in the thread_subscriptions table. The threads-view UI refresh is
+// handled by the same ThreadsListDirtyMsg dispatch path the rest of
+// the reconnect / mark events use — no per-event UI message is
+// emitted here, because the threads-view rerender is driven off the
+// cache content rather than off direct event injection.
+func (h *rtmEventHandler) OnThreadSubscriptionChanged(channelID, threadTS, lastRead string, active bool) {
+	if h.isActive != nil && !h.isActive() {
+		return
+	}
+	if h.db != nil {
+		if err := h.db.UpsertThreadSubscription(h.workspaceID, channelID, threadTS, lastRead, active); err != nil {
+			debuglog.Cache("OnThreadSubscriptionChanged: UpsertThreadSubscription %s/%s: %v",
+				channelID, threadTS, err)
+		}
+	}
+	if h.program != nil {
+		// Trigger a threads-view refetch so the new row shows up
+		// (active=true) or the existing row disappears (active=false).
+		h.program.Send(ui.ThreadsListDirtyMsg{TeamID: h.workspaceID})
+	}
+}
+```
+
+And replace the body of `OnThreadMarked`:
 
 ```go
 func (h *rtmEventHandler) OnThreadMarked(channelID, threadTS, ts string, read bool) {
 	if h.isActive != nil && !h.isActive() {
-		// Inactive workspace: skip both persistence and UI dispatch.
 		return
 	}
 
@@ -1391,29 +1595,29 @@ func (h *rtmEventHandler) OnThreadMarked(channelID, threadTS, ts string, read bo
 }
 ```
 
-If `debuglog` isn't imported in `cmd/slk/main.go`, add the import — most of the file already uses it, so the import should already be there.
+If `debuglog` isn't imported in `cmd/slk/main.go`, add the import — most of the file already uses it, so the import should already be there. If any `EventHandler` test fakes in `internal/slack/` complain, give them empty `OnThreadSubscriptionChanged` method receivers.
 
-- [ ] **Step 5: Run test, see pass**
+- [ ] **Step 6: Run tests, see pass**
 
 ```
-go test ./cmd/slk/ -run TestOnThreadMarked_UpsertsSubscription -v
+go test ./internal/slack/... ./cmd/slk/... -run 'TestOnThreadMarked_UpsertsSubscription|TestOnThreadSubscriptionChanged' -v
+```
+
+Expected: PASS for all three tests.
+
+- [ ] **Step 7: Run full suites to catch missed handler impls**
+
+```
+go test ./...
 ```
 
 Expected: PASS.
 
-- [ ] **Step 6: Run full cmd/slk suite to confirm no regressions**
+- [ ] **Step 8: Commit**
 
 ```
-go test ./cmd/slk/...
-```
-
-Expected: PASS.
-
-- [ ] **Step 7: Commit**
-
-```
-git add cmd/slk/main.go cmd/slk/event_handler_test.go
-git commit -m "main: persist thread subscription state on WS thread_marked"
+git add internal/slack/events.go cmd/slk/main.go cmd/slk/event_handler_test.go
+git commit -m "ws: thread_subscribed / thread_marked persist to thread_subscriptions"
 ```
 
 ---
@@ -1422,9 +1626,11 @@ git commit -m "main: persist thread subscription state on WS thread_marked"
 
 **Files:**
 - Modify: `cmd/slk/reconnect_backfill.go` (extend `historyFetcher` interface; add `runSubscriptionPhase`; thread an `availableCb` into `backfiller` so failure can flip `wctx.SubscriptionsAvailable` without `cmd/slk/reconnect_backfill.go` reaching into the `WorkspaceContext` type).
-- Modify: `cmd/slk/reconnect_backfill_test.go` (extend `fakeHistory` with `ListThreadSubscriptions`; add four new tests).
+- Modify: `cmd/slk/reconnect_backfill_test.go` (extend `fakeHistory` with `ListThreadSubscriptions`; add new tests).
 
 `*slackclient.Client` already implicitly satisfies the new interface method after Task 6 lands.
+
+**Key simplification from discovery:** the `subscriptions.thread.getView` response already carries the full parent message in `root_msg` (text, blocks, user, channel, etc.). The plan no longer needs a separate "fetch parents for uncached threads via GetReplies" sub-phase — `runSubscriptionPhase` upserts each `RootMessage` directly into the `messages` cache. This eliminates a per-thread round trip and means `db.HasMessage` from the earlier plan draft is unnecessary.
 
 - [ ] **Step 1: Extend `historyFetcher` and `fakeHistory` first (no behavior change)**
 
@@ -1443,7 +1649,7 @@ to:
 type historyFetcher interface {
 	GetHistorySince(ctx context.Context, channelID, oldest string, maxTotal int) ([]slack.Message, error)
 	GetReplies(ctx context.Context, channelID, threadTS string) ([]slack.Message, error)
-	ListThreadSubscriptions(ctx context.Context) ([]slackclient.ThreadSubscription, error)
+	ListThreadSubscriptions(ctx context.Context) ([]slackclient.ThreadSubscriptionView, error)
 }
 ```
 
@@ -1464,12 +1670,12 @@ In `cmd/slk/reconnect_backfill_test.go`, extend `fakeHistory`:
 ```go
 type fakeHistory struct {
 	// ... existing fields ...
-	subscriptionsResponse []slackclient.ThreadSubscription
+	subscriptionsResponse []slackclient.ThreadSubscriptionView
 	subscriptionsErr      error
 	subscriptionsCalls    int
 }
 
-func (f *fakeHistory) ListThreadSubscriptions(ctx context.Context) ([]slackclient.ThreadSubscription, error) {
+func (f *fakeHistory) ListThreadSubscriptions(ctx context.Context) ([]slackclient.ThreadSubscriptionView, error) {
 	f.mu.Lock()
 	f.subscriptionsCalls++
 	f.mu.Unlock()
@@ -1565,16 +1771,33 @@ Expected: PASS — these tests should pass a `nil` availableCb too (update the t
 
 - [ ] **Step 3: Write the failing tests for `runSubscriptionPhase`**
 
-Append to `cmd/slk/reconnect_backfill_test.go`:
+Append to `cmd/slk/reconnect_backfill_test.go`. Helper `subView` constructs a `ThreadSubscriptionView` from primitives so the tests stay terse:
 
 ```go
+func subView(channel, threadTS, lastRead, text, user string, active bool) slackclient.ThreadSubscriptionView {
+	return slackclient.ThreadSubscriptionView{
+		Subscription: slackclient.ThreadSubscription{
+			ChannelID: channel, ThreadTS: threadTS, LastRead: lastRead, Active: active,
+		},
+		RootMessage: slack.Message{
+			Msg: slack.Msg{
+				Timestamp:       threadTS,
+				ThreadTimestamp: threadTS,
+				User:            user,
+				Text:            text,
+				Channel:         channel,
+			},
+		},
+	}
+}
+
 func TestBackfillSubscriptions_PopulatesTable(t *testing.T) {
 	db := newTestDB(t)
 	fake := &fakeHistory{
 		responses: map[string][]*slack.GetConversationHistoryResponse{}, // no channels
-		subscriptionsResponse: []slackclient.ThreadSubscription{
-			{ChannelID: "C1", ThreadTS: "1700000100.000000", LastRead: "1700000150.000000", Active: true},
-			{ChannelID: "C2", ThreadTS: "1700000200.000000", LastRead: "1700000250.000000", Active: true},
+		subscriptionsResponse: []slackclient.ThreadSubscriptionView{
+			subView("C1", "1700000100.000000", "1700000150.000000", "p1", "U2", true),
+			subView("C2", "1700000200.000000", "1700000250.000000", "p2", "U3", true),
 		},
 	}
 	bf := newBackfiller(fake, db, "T1", "U1", nil, 4, 500, nil)
@@ -1590,24 +1813,14 @@ func TestBackfillSubscriptions_PopulatesTable(t *testing.T) {
 	}
 }
 
-func TestBackfillSubscriptions_FetchesParentsForUncachedThreads(t *testing.T) {
+func TestBackfillSubscriptions_UpsertsRootMessageIntoMessagesCache(t *testing.T) {
 	db := newTestDB(t)
 	if err := db.UpsertChannel(cache.Channel{ID: "C1", WorkspaceID: "T1", Name: "general"}); err != nil {
 		t.Fatalf("UpsertChannel: %v", err)
 	}
-	// Thread X is in the subscription list but no message rows are
-	// cached for it. The backfiller should call GetReplies(C1, X) so
-	// the parent gets fetched.
 	fake := &fakeHistory{
-		responses: map[string][]*slack.GetConversationHistoryResponse{},
-		subscriptionsResponse: []slackclient.ThreadSubscription{
-			{ChannelID: "C1", ThreadTS: "1700000100.000000", LastRead: "1700000150.000000", Active: true},
-		},
-		repliesResponses: map[string][]slack.Message{
-			"1700000100.000000": {
-				{Timestamp: "1700000100.000000", User: "U2", Text: "parent X", ThreadTimestamp: "1700000100.000000"},
-				{Timestamp: "1700000200.000000", User: "U3", Text: "reply X1", ThreadTimestamp: "1700000100.000000"},
-			},
+		subscriptionsResponse: []slackclient.ThreadSubscriptionView{
+			subView("C1", "1700000100.000000", "1700000150.000000", "parent X", "U2", true),
 		},
 	}
 	bf := newBackfiller(fake, db, "T1", "U1", nil, 4, 500, nil)
@@ -1615,49 +1828,24 @@ func TestBackfillSubscriptions_FetchesParentsForUncachedThreads(t *testing.T) {
 		t.Fatalf("runSubscriptionPhase: %v", err)
 	}
 
-	// Parent should now be cached.
+	// The root_msg should have been upserted into the messages cache.
 	msgs, err := db.GetThreadReplies("C1", "1700000100.000000")
 	if err != nil {
 		t.Fatalf("GetThreadReplies: %v", err)
 	}
-	if len(msgs) < 1 {
-		t.Fatalf("parent + replies were not cached: %v", msgs)
+	if len(msgs) != 1 {
+		t.Fatalf("want 1 cached message (the parent), got %d", len(msgs))
+	}
+	if msgs[0].Text != "parent X" || msgs[0].UserID != "U2" {
+		t.Fatalf("root_msg fields not preserved: %+v", msgs[0])
 	}
 
-	// And exactly one GetReplies call should have been made.
-	fake.mu.Lock()
-	defer fake.mu.Unlock()
-	if len(fake.repliesCalls) != 1 {
-		t.Fatalf("want 1 GetReplies call, got %d: %v", len(fake.repliesCalls), fake.repliesCalls)
-	}
-}
-
-func TestBackfillSubscriptions_DoesNotRefetchParentsAlreadyCached(t *testing.T) {
-	db := newTestDB(t)
-	if err := db.UpsertChannel(cache.Channel{ID: "C1", WorkspaceID: "T1", Name: "general"}); err != nil {
-		t.Fatalf("UpsertChannel: %v", err)
-	}
-	// Pre-seed the parent.
-	if err := db.UpsertMessage(cache.Message{
-		TS: "1700000100.000000", ChannelID: "C1", WorkspaceID: "T1", UserID: "U2",
-		Text: "parent", ThreadTS: "1700000100.000000",
-	}); err != nil {
-		t.Fatalf("UpsertMessage: %v", err)
-	}
-	fake := &fakeHistory{
-		responses: map[string][]*slack.GetConversationHistoryResponse{},
-		subscriptionsResponse: []slackclient.ThreadSubscription{
-			{ChannelID: "C1", ThreadTS: "1700000100.000000", LastRead: "1700000150.000000", Active: true},
-		},
-	}
-	bf := newBackfiller(fake, db, "T1", "U1", nil, 4, 500, nil)
-	if err := bf.runSubscriptionPhase(context.Background()); err != nil {
-		t.Fatalf("runSubscriptionPhase: %v", err)
-	}
+	// No GetReplies calls should have been made — root_msg already
+	// gave us the parent.
 	fake.mu.Lock()
 	defer fake.mu.Unlock()
 	if len(fake.repliesCalls) != 0 {
-		t.Fatalf("expected 0 GetReplies calls when parent is cached, got %d: %v", len(fake.repliesCalls), fake.repliesCalls)
+		t.Fatalf("expected 0 GetReplies calls, got %d: %v", len(fake.repliesCalls), fake.repliesCalls)
 	}
 }
 
@@ -1668,8 +1856,8 @@ func TestBackfillSubscriptions_ReconcilesUnsubscribes(t *testing.T) {
 		t.Fatalf("UpsertThreadSubscription: %v", err)
 	}
 	fake := &fakeHistory{
-		subscriptionsResponse: []slackclient.ThreadSubscription{
-			{ChannelID: "C2", ThreadTS: "1700000300.000000", LastRead: "1700000350.000000", Active: true},
+		subscriptionsResponse: []slackclient.ThreadSubscriptionView{
+			subView("C2", "1700000300.000000", "1700000350.000000", "p2", "U3", true),
 		},
 	}
 	bf := newBackfiller(fake, db, "T1", "U1", nil, 4, 500, nil)
@@ -1733,23 +1921,24 @@ Append to `cmd/slk/reconnect_backfill.go`:
 
 ```go
 // runSubscriptionPhase fetches the workspace's full thread-subscription
-// list, reconciles the local cache against it, and (best-effort)
-// fetches parents for any subscribed thread whose parent isn't in the
-// local messages cache. Side effects:
+// list via subscriptions.thread.getView, reconciles the local
+// thread_subscriptions table against it, and upserts every returned
+// root_msg into the messages cache so the threads-view can render
+// parents even for threads slk has never seen a message from.
 //
-//  1. Local thread_subscriptions table reflects the server's
-//     authoritative state at the moment of the call.
-//  2. b.availableCb (if non-nil) is called with true on success or
-//     false on error so the UI banner can reflect availability.
-//  3. Parent messages for previously-uncached subscribed threads are
-//     fetched via GetReplies through the existing concurrency pool.
+// Side effects:
+//  1. thread_subscriptions reflects the server's authoritative state.
+//  2. b.availableCb is called with true/false so the UI banner can
+//     reflect the outcome.
+//  3. Each ThreadSubscriptionView.RootMessage is upserted into the
+//     messages cache (idempotent by (ts, channel_id)).
 //
 // Errors from the API call are returned to the caller; per-thread
-// parent-fetch failures are logged and skipped (one bad thread does
-// not abort the pass).
+// message-upsert failures are logged and skipped (one bad message
+// does not abort the pass).
 func (b *backfiller) runSubscriptionPhase(ctx context.Context) error {
 	start := time.Now()
-	subs, err := b.client.ListThreadSubscriptions(ctx)
+	views, err := b.client.ListThreadSubscriptions(ctx)
 	if err != nil {
 		debuglog.Backfill("team=%s subscription-phase err=%v", b.workspaceID, err)
 		if b.availableCb != nil {
@@ -1761,22 +1950,19 @@ func (b *backfiller) runSubscriptionPhase(ctx context.Context) error {
 		b.availableCb(true)
 	}
 
-	// Adapt internal/slack types into cache.ThreadSubscription rows.
-	fresh := make([]cache.ThreadSubscription, 0, len(subs))
-	for _, s := range subs {
-		// Filter to active=true so tombstones don't get re-promoted.
-		// Per the Implementation discovery items in the spec: if the
-		// endpoint returns inactive rows, this filter still does the
-		// right thing — Reconcile tombstones any local active row not
-		// present in `fresh`.
-		if !s.Active {
+	// Adapt slack-client view rows into cache.ThreadSubscription. The
+	// API method already filters out subscribed=false items, so the
+	// list is conservative: every item here is currently active.
+	fresh := make([]cache.ThreadSubscription, 0, len(views))
+	for _, v := range views {
+		if !v.Subscription.Active {
 			continue
 		}
 		fresh = append(fresh, cache.ThreadSubscription{
 			WorkspaceID: b.workspaceID,
-			ChannelID:   s.ChannelID,
-			ThreadTS:    s.ThreadTS,
-			LastRead:    s.LastRead,
+			ChannelID:   v.Subscription.ChannelID,
+			ThreadTS:    v.Subscription.ThreadTS,
+			LastRead:    v.Subscription.LastRead,
 			Active:      true,
 		})
 	}
@@ -1785,64 +1971,42 @@ func (b *backfiller) runSubscriptionPhase(ctx context.Context) error {
 		return err
 	}
 
-	// Fetch parents for any subscribed thread missing from the
-	// messages cache. The "missing parent" probe is a single
-	// db.GetMessage call per thread; cheap.
-	var missing []threadKey
-	for _, s := range fresh {
-		exists, err := b.db.HasMessage(s.ChannelID, s.ThreadTS)
-		if err != nil {
-			debuglog.Backfill("team=%s HasMessage(%s/%s) err=%v", b.workspaceID, s.ChannelID, s.ThreadTS, err)
+	// Upsert the root_msg from every view into the messages cache.
+	// Mirrors the upsert pattern in backfillOneThread (the parent
+	// payload comes from a different endpoint here, but the cache
+	// row shape is the same). Skip entries where RootMessage is
+	// empty (Subscription kept but RootMessage couldn't be decoded;
+	// see the ListThreadSubscriptions docstring).
+	upserted := 0
+	for _, v := range views {
+		if v.RootMessage.Timestamp == "" {
 			continue
 		}
-		if !exists {
-			missing = append(missing, threadKey{ChannelID: s.ChannelID, ThreadTS: s.ThreadTS})
+		raw, _ := json.Marshal(v.RootMessage)
+		if err := b.db.UpsertMessage(cache.Message{
+			TS:          v.RootMessage.Timestamp,
+			ChannelID:   v.Subscription.ChannelID,
+			WorkspaceID: b.workspaceID,
+			UserID:      v.RootMessage.User,
+			Text:        v.RootMessage.Text,
+			ThreadTS:    v.RootMessage.ThreadTimestamp,
+			ReplyCount:  v.RootMessage.ReplyCount,
+			Subtype:     v.RootMessage.SubType,
+			RawJSON:     string(raw),
+			CreatedAt:   time.Now().Unix(),
+		}); err != nil {
+			debuglog.Backfill("team=%s subscription-phase upsert root_msg %s/%s err=%v",
+				b.workspaceID, v.Subscription.ChannelID, v.Subscription.ThreadTS, err)
+			continue
 		}
+		upserted++
 	}
 
-	sem := make(chan struct{}, b.concurrency)
-	var wg sync.WaitGroup
-	for _, k := range missing {
-		wg.Add(1)
-		go func(k threadKey) {
-			defer wg.Done()
-			sem <- struct{}{}
-			defer func() { <-sem }()
-			if err := b.backfillOneThread(ctx, k); err != nil {
-				debuglog.Backfill("team=%s subscription-phase parent-fetch %s/%s err=%v",
-					b.workspaceID, k.ChannelID, k.ThreadTS, err)
-			}
-		}(k)
-	}
-	wg.Wait()
-
-	debuglog.Backfill("team=%s subscription-phase subs=%d missing_parents=%d dur_ms=%d",
-		b.workspaceID, len(fresh), len(missing), time.Since(start).Milliseconds())
+	debuglog.Backfill("team=%s subscription-phase subs=%d root_msgs_upserted=%d dur_ms=%d",
+		b.workspaceID, len(fresh), upserted, time.Since(start).Milliseconds())
 	return nil
 }
 ```
-
-This depends on a new `db.HasMessage(channelID, ts string) (bool, error)` helper. Add it to `internal/cache/messages.go`:
-
-```go
-// HasMessage reports whether a message with the given (channel_id, ts)
-// exists in the cache and isn't tombstoned. Used by the reconnect
-// backfill to skip parent-fetches for threads already cached.
-func (db *DB) HasMessage(channelID, ts string) (bool, error) {
-	const q = `SELECT 1 FROM messages WHERE channel_id=? AND ts=? AND is_deleted=0 LIMIT 1`
-	var one int
-	err := db.conn.QueryRow(q, channelID, ts).Scan(&one)
-	if err == sql.ErrNoRows {
-		return false, nil
-	}
-	if err != nil {
-		return false, fmt.Errorf("HasMessage: %w", err)
-	}
-	return true, nil
-}
-```
-
-(Add `"database/sql"` to `messages.go` imports if not already present.)
 
 Hook the new phase into `run()` so it runs between thread-phase and the `ThreadsListDirtyMsg` dispatch. Update:
 
@@ -1886,8 +2050,8 @@ Expected: PASS.
 - [ ] **Step 8: Commit**
 
 ```
-git add cmd/slk/reconnect_backfill.go cmd/slk/reconnect_backfill_test.go cmd/slk/main.go internal/cache/messages.go
-git commit -m "backfill: subscription phase populates and reconciles thread_subscriptions"
+git add cmd/slk/reconnect_backfill.go cmd/slk/reconnect_backfill_test.go cmd/slk/main.go
+git commit -m "backfill: subscription phase via subscriptions.thread.getView"
 ```
 
 ---
