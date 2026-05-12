@@ -86,3 +86,86 @@ ORDER BY channel_id, thread_ts
 	}
 	return out, rows.Err()
 }
+
+// ReconcileThreadSubscriptions replaces the workspace's local
+// subscription set with the given fresh list. Upserts every fresh
+// entry (active=1) and tombstones (active=0) any local active row
+// whose (channel_id, thread_ts) doesn't appear in the fresh list.
+//
+// Used by the reconnect backfill: after fetching the full server-side
+// list, calling this reconciles any subscribes/unsubscribes that
+// happened while the WS was disconnected. Tombstoning preserves the
+// row's LastRead so a later re-subscribe doesn't lose history.
+func (db *DB) ReconcileThreadSubscriptions(workspaceID string, fresh []ThreadSubscription) error {
+	if workspaceID == "" {
+		return fmt.Errorf("ReconcileThreadSubscriptions: workspaceID required")
+	}
+
+	tx, err := db.conn.Begin()
+	if err != nil {
+		return fmt.Errorf("begin reconcile tx: %w", err)
+	}
+	defer tx.Rollback() //nolint:errcheck
+
+	now := time.Now().Unix()
+
+	// Build the set of keys present in the fresh list.
+	type key struct{ ch, ts string }
+	freshKeys := make(map[key]struct{}, len(fresh))
+	for _, s := range fresh {
+		freshKeys[key{s.ChannelID, s.ThreadTS}] = struct{}{}
+	}
+
+	// 1. Upsert each fresh entry as active=1.
+	const upsertQ = `
+INSERT INTO thread_subscriptions
+    (workspace_id, channel_id, thread_ts, last_read, active, updated_at)
+VALUES (?, ?, ?, ?, 1, ?)
+ON CONFLICT(workspace_id, channel_id, thread_ts) DO UPDATE SET
+    last_read  = excluded.last_read,
+    active     = 1,
+    updated_at = excluded.updated_at
+`
+	for _, s := range fresh {
+		if _, err := tx.Exec(upsertQ, workspaceID, s.ChannelID, s.ThreadTS, s.LastRead, now); err != nil {
+			return fmt.Errorf("upserting fresh subscription (%s/%s): %w", s.ChannelID, s.ThreadTS, err)
+		}
+	}
+
+	// 2. Find currently-active rows that aren't in the fresh list and
+	// tombstone them. Walk the existing active rows once; tombstone in
+	// a second pass to avoid mutating during iteration.
+	rows, err := tx.Query(
+		`SELECT channel_id, thread_ts FROM thread_subscriptions WHERE workspace_id=? AND active=1`,
+		workspaceID,
+	)
+	if err != nil {
+		return fmt.Errorf("listing active for reconcile: %w", err)
+	}
+	var toTombstone []key
+	for rows.Next() {
+		var k key
+		if err := rows.Scan(&k.ch, &k.ts); err != nil {
+			rows.Close()
+			return fmt.Errorf("scanning active for reconcile: %w", err)
+		}
+		if _, ok := freshKeys[k]; !ok {
+			toTombstone = append(toTombstone, k)
+		}
+	}
+	rows.Close()
+
+	for _, k := range toTombstone {
+		if _, err := tx.Exec(
+			`UPDATE thread_subscriptions SET active=0, updated_at=? WHERE workspace_id=? AND channel_id=? AND thread_ts=?`,
+			now, workspaceID, k.ch, k.ts,
+		); err != nil {
+			return fmt.Errorf("tombstoning subscription (%s/%s): %w", k.ch, k.ts, err)
+		}
+	}
+
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit reconcile tx: %w", err)
+	}
+	return nil
+}

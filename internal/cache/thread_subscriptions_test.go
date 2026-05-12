@@ -100,3 +100,88 @@ func mustList(t *testing.T, db *DB, ws string) []ThreadSubscription {
 	}
 	return got
 }
+
+func TestReconcileThreadSubscriptions_InsertsNew(t *testing.T) {
+	db := setupDBWithWorkspace(t)
+	fresh := []ThreadSubscription{
+		{WorkspaceID: "T1", ChannelID: "C1", ThreadTS: "1700000000.000100", LastRead: "1700000000.000200", Active: true},
+		{WorkspaceID: "T1", ChannelID: "C2", ThreadTS: "1700000001.000100", LastRead: "1700000001.000200", Active: true},
+	}
+	if err := db.ReconcileThreadSubscriptions("T1", fresh); err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+	got := mustList(t, db, "T1")
+	if len(got) != 2 {
+		t.Fatalf("want 2 rows, got %d", len(got))
+	}
+}
+
+func TestReconcileThreadSubscriptions_TombstonesMissing(t *testing.T) {
+	db := setupDBWithWorkspace(t)
+	// Pre-existing local row that's no longer in the fresh list.
+	mustUpsert(t, db, "T1", "C1", "1700000000.000100", "1700000000.000500", true)
+	// Fresh list contains a different thread only.
+	fresh := []ThreadSubscription{
+		{WorkspaceID: "T1", ChannelID: "C2", ThreadTS: "1700000001.000100", LastRead: "1700000001.000200", Active: true},
+	}
+	if err := db.ReconcileThreadSubscriptions("T1", fresh); err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+	got := mustList(t, db, "T1")
+	if len(got) != 1 {
+		t.Fatalf("want 1 active row after reconcile, got %d", len(got))
+	}
+	if got[0].ChannelID != "C2" {
+		t.Fatalf("wrong row survived reconcile: %+v", got[0])
+	}
+	// The tombstoned row should still exist with active=0 and its LastRead preserved.
+	var lastRead string
+	var active int
+	err := db.conn.QueryRow(
+		`SELECT last_read, active FROM thread_subscriptions WHERE workspace_id=? AND channel_id=? AND thread_ts=?`,
+		"T1", "C1", "1700000000.000100",
+	).Scan(&lastRead, &active)
+	if err != nil {
+		t.Fatalf("tombstone row missing: %v", err)
+	}
+	if active != 0 {
+		t.Fatalf("expected tombstone (active=0), got active=%d", active)
+	}
+	if lastRead != "1700000000.000500" {
+		t.Fatalf("LastRead not preserved on tombstone: %q", lastRead)
+	}
+}
+
+func TestReconcileThreadSubscriptions_UpdatesExisting(t *testing.T) {
+	db := setupDBWithWorkspace(t)
+	mustUpsert(t, db, "T1", "C1", "1700000000.000100", "1700000000.000200", true)
+	fresh := []ThreadSubscription{
+		{WorkspaceID: "T1", ChannelID: "C1", ThreadTS: "1700000000.000100", LastRead: "1700000000.000900", Active: true},
+	}
+	if err := db.ReconcileThreadSubscriptions("T1", fresh); err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+	got := mustList(t, db, "T1")
+	if len(got) != 1 || got[0].LastRead != "1700000000.000900" {
+		t.Fatalf("Reconcile didn't update LastRead: %+v", got)
+	}
+}
+
+func TestReconcileThreadSubscriptions_PerWorkspaceIsolation(t *testing.T) {
+	db := setupDBWithWorkspace(t)
+	// Seed both workspaces. T2 will be ignored entirely by Reconcile("T1").
+	if err := db.UpsertWorkspace(Workspace{ID: "T2", Name: "T2"}); err != nil {
+		t.Fatalf("UpsertWorkspace T2: %v", err)
+	}
+	mustUpsert(t, db, "T2", "C9", "1700000000.000100", "1700000000.000200", true)
+
+	fresh := []ThreadSubscription{
+		{WorkspaceID: "T1", ChannelID: "C1", ThreadTS: "1700000000.000100", LastRead: "1700000000.000200", Active: true},
+	}
+	if err := db.ReconcileThreadSubscriptions("T1", fresh); err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+	if got := mustList(t, db, "T2"); len(got) != 1 {
+		t.Fatalf("T2 should be unaffected, got %d active rows", len(got))
+	}
+}
