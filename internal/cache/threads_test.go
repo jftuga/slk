@@ -54,7 +54,7 @@ func TestListInvolvedThreads_IncludesAuthoredRepliedMentioned(t *testing.T) {
 	}
 }
 
-func TestListInvolvedThreads_OrderingUnreadFirst(t *testing.T) {
+func TestListInvolvedThreads_OrderingByLastReplyTS(t *testing.T) {
 	db := setupDBWithWorkspace(t)
 	defer db.Close()
 	seedThreadFixtures(t, db, "USELF")
@@ -66,25 +66,57 @@ func TestListInvolvedThreads_OrderingUnreadFirst(t *testing.T) {
 	if len(got) != 3 {
 		t.Fatalf("expected 3 threads, got %d", len(got))
 	}
-	// Unread first: A (last reply ts 200) and C (last reply ts 700) are unread; B is read.
-	// Within unread, newest first: C then A.
+	// Sort is now purely LastReplyTS DESC.
+	// Thread C last_reply_ts = 700, Thread B last_reply_ts = 400, Thread A last_reply_ts = 200.
 	if got[0].ThreadTS != "1700000600.000000" {
 		t.Errorf("got[0] = %s, want C (1700000600.000000)", got[0].ThreadTS)
 	}
-	if !got[0].Unread {
-		t.Errorf("got[0] should be unread")
+	if got[1].ThreadTS != "1700000300.000000" {
+		t.Errorf("got[1] = %s, want B (1700000300.000000)", got[1].ThreadTS)
 	}
-	if got[1].ThreadTS != "1700000100.000000" {
-		t.Errorf("got[1] = %s, want A (1700000100.000000)", got[1].ThreadTS)
+	if got[2].ThreadTS != "1700000100.000000" {
+		t.Errorf("got[2] = %s, want A (1700000100.000000)", got[2].ThreadTS)
 	}
+}
+
+func TestListInvolvedThreads_UnreadDoesNotChangeOrder(t *testing.T) {
+	// Regression for the screenshot bug: an Unread=true thread with
+	// an older LastReplyTS must NOT sort ahead of an Unread=false
+	// thread with a newer LastReplyTS.
+	db := setupDBWithWorkspace(t)
+	defer db.Close()
+	// Channel with empty last_read_ts → Unread heuristic at threads.go:95
+	// flips to true whenever LastReplyBy != selfUserID.
+	db.UpsertChannel(Channel{ID: "C1", WorkspaceID: "T1", Name: "general", Type: "channel"})
+
+	// Older thread: someone-else replied last → Unread=true under heuristic.
+	db.UpsertMessage(Message{TS: "1000.000000", ChannelID: "C1", WorkspaceID: "T1", UserID: "USELF", Text: "old self parent", ThreadTS: "1000.000000"})
+	db.UpsertMessage(Message{TS: "1100.000000", ChannelID: "C1", WorkspaceID: "T1", UserID: "U2", Text: "old other reply", ThreadTS: "1000.000000"})
+
+	// Newer thread: self replied last → Unread=false.
+	db.UpsertMessage(Message{TS: "2000.000000", ChannelID: "C1", WorkspaceID: "T1", UserID: "U2", Text: "newer parent", ThreadTS: "2000.000000"})
+	db.UpsertMessage(Message{TS: "2100.000000", ChannelID: "C1", WorkspaceID: "T1", UserID: "USELF", Text: "newer self reply", ThreadTS: "2000.000000"})
+
+	got, err := db.ListInvolvedThreads("T1", "USELF")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("expected 2 threads, got %d", len(got))
+	}
+	if got[0].ThreadTS != "2000.000000" {
+		t.Errorf("got[0] = %s, want newer thread 2000.000000 (LastReplyTS DESC must win regardless of Unread)", got[0].ThreadTS)
+	}
+	if got[1].ThreadTS != "1000.000000" {
+		t.Errorf("got[1] = %s, want older thread 1000.000000", got[1].ThreadTS)
+	}
+	// And confirm Unread heuristic still computes as expected — the
+	// dot indicator should still light up.
 	if !got[1].Unread {
-		t.Errorf("got[1] should be unread")
+		t.Errorf("got[1] (older thread with other-replied-last) should still be Unread=true under heuristic")
 	}
-	if got[2].ThreadTS != "1700000300.000000" {
-		t.Errorf("got[2] = %s, want B (1700000300.000000)", got[2].ThreadTS)
-	}
-	if got[2].Unread {
-		t.Errorf("got[2] should be read")
+	if got[0].Unread {
+		t.Errorf("got[0] (newer thread with self-replied-last) should be Unread=false")
 	}
 }
 
@@ -174,5 +206,105 @@ func TestListInvolvedThreads_PerWorkspaceIsolation(t *testing.T) {
 	}
 	if len(got2) != 1 || got2[0].ThreadTS != "3.000000" {
 		t.Errorf("T2 query should return only T2 thread, got %+v", got2)
+	}
+}
+
+func TestThreadInvolvesUser_AuthoredParent(t *testing.T) {
+	db := setupDBWithWorkspace(t)
+	defer db.Close()
+	db.UpsertChannel(Channel{ID: "C1", WorkspaceID: "T1", Name: "general", Type: "channel"})
+	db.UpsertMessage(Message{TS: "1.000000", ChannelID: "C1", WorkspaceID: "T1", UserID: "USELF", Text: "parent", ThreadTS: "1.000000"})
+
+	involved, err := db.ThreadInvolvesUser("T1", "C1", "1.000000", "USELF")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !involved {
+		t.Error("self-authored parent should count as involved")
+	}
+}
+
+func TestThreadInvolvesUser_RepliedToThread(t *testing.T) {
+	db := setupDBWithWorkspace(t)
+	defer db.Close()
+	db.UpsertChannel(Channel{ID: "C1", WorkspaceID: "T1", Name: "general", Type: "channel"})
+	db.UpsertMessage(Message{TS: "1.000000", ChannelID: "C1", WorkspaceID: "T1", UserID: "U2", Text: "parent", ThreadTS: "1.000000"})
+	db.UpsertMessage(Message{TS: "2.000000", ChannelID: "C1", WorkspaceID: "T1", UserID: "USELF", Text: "my reply", ThreadTS: "1.000000"})
+
+	involved, err := db.ThreadInvolvesUser("T1", "C1", "1.000000", "USELF")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !involved {
+		t.Error("self reply should count as involved")
+	}
+}
+
+func TestThreadInvolvesUser_MentionedAngleBracket(t *testing.T) {
+	db := setupDBWithWorkspace(t)
+	defer db.Close()
+	db.UpsertChannel(Channel{ID: "C1", WorkspaceID: "T1", Name: "general", Type: "channel"})
+	db.UpsertMessage(Message{TS: "1.000000", ChannelID: "C1", WorkspaceID: "T1", UserID: "U2", Text: "hey <@USELF> ping", ThreadTS: "1.000000"})
+
+	involved, err := db.ThreadInvolvesUser("T1", "C1", "1.000000", "USELF")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !involved {
+		t.Error("<@USELF> mention should count as involved")
+	}
+}
+
+func TestThreadInvolvesUser_PlainTextNotInvolved(t *testing.T) {
+	// Bare "USELF" without <@…> wrapping must NOT count, matching
+	// ListInvolvedThreads' semantics.
+	db := setupDBWithWorkspace(t)
+	defer db.Close()
+	db.UpsertChannel(Channel{ID: "C1", WorkspaceID: "T1", Name: "general", Type: "channel"})
+	db.UpsertMessage(Message{TS: "1.000000", ChannelID: "C1", WorkspaceID: "T1", UserID: "U2", Text: "discussing USELF in plain text", ThreadTS: "1.000000"})
+
+	involved, err := db.ThreadInvolvesUser("T1", "C1", "1.000000", "USELF")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if involved {
+		t.Error("plain-text USELF should not count as involved")
+	}
+}
+
+func TestThreadInvolvesUser_NoneMatch(t *testing.T) {
+	db := setupDBWithWorkspace(t)
+	defer db.Close()
+	db.UpsertChannel(Channel{ID: "C1", WorkspaceID: "T1", Name: "general", Type: "channel"})
+	db.UpsertMessage(Message{TS: "1.000000", ChannelID: "C1", WorkspaceID: "T1", UserID: "U2", Text: "parent", ThreadTS: "1.000000"})
+	db.UpsertMessage(Message{TS: "2.000000", ChannelID: "C1", WorkspaceID: "T1", UserID: "U3", Text: "reply", ThreadTS: "1.000000"})
+
+	involved, err := db.ThreadInvolvesUser("T1", "C1", "1.000000", "USELF")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if involved {
+		t.Error("no self / no mention thread should not count")
+	}
+}
+
+func TestThreadInvolvesUser_RespectsDeleted(t *testing.T) {
+	// A deleted message should not count as involvement, matching the
+	// is_deleted = 0 clause in ListInvolvedThreads.
+	db := setupDBWithWorkspace(t)
+	defer db.Close()
+	db.UpsertChannel(Channel{ID: "C1", WorkspaceID: "T1", Name: "general", Type: "channel"})
+	db.UpsertMessage(Message{TS: "1.000000", ChannelID: "C1", WorkspaceID: "T1", UserID: "U2", Text: "parent", ThreadTS: "1.000000"})
+	db.UpsertMessage(Message{TS: "2.000000", ChannelID: "C1", WorkspaceID: "T1", UserID: "USELF", Text: "my reply", ThreadTS: "1.000000"})
+	if err := db.DeleteMessage("C1", "2.000000"); err != nil {
+		t.Fatal(err)
+	}
+
+	involved, err := db.ThreadInvolvesUser("T1", "C1", "1.000000", "USELF")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if involved {
+		t.Error("deleted self reply should not count as involved")
 	}
 }

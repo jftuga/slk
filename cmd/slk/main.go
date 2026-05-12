@@ -1246,6 +1246,7 @@ func run() error {
 				activeChannelID: func() string { return app.ActiveChannelID() },
 				cfg:             cfg,
 				wsCtx:           wctx,
+				backfillGate:    dedupeGate{window: 30 * time.Second},
 			}
 			wctx.RTMHandler = handler
 			wctx.ConnMgr = slackclient.NewConnectionManager(wctx.Client, handler)
@@ -2431,6 +2432,11 @@ type rtmEventHandler struct {
 
 	// Back-reference for self-presence/DND state mutation.
 	wsCtx *WorkspaceContext
+
+	// backfillGate enforces a 30 s minimum between reconnect-driven
+	// backfill passes. Per-handler so each workspace has its own gate.
+	// Initialized at construction with window = 30 * time.Second.
+	backfillGate dedupeGate
 }
 
 func (h *rtmEventHandler) OnMessage(channelID, userID, ts, text, threadTS, subtype string, edited bool, files []slack.File, blocks slack.Blocks, attachments []slack.Attachment) {
@@ -2683,6 +2689,31 @@ func (h *rtmEventHandler) OnConnect() {
 			log.Printf("section store rebootstrap for %s failed: %v", h.wsCtx.TeamName, err)
 		} else {
 			h.refreshSectionsForActive()
+		}
+	}
+
+	// Reconnect backfill: catch up on messages missed while the WS
+	// was dead. The 30 s dedupe in backfillGate prevents disconnect
+	// flaps from spawning overlapping passes. Runs in its own
+	// goroutine so the WS read loop isn't blocked on HTTP work.
+	//
+	// Note on first-connect: the initial WS connect also fires
+	// OnConnect, so backfill runs at startup too. This is harmless —
+	// synced_at for freshly-bootstrapped channels is current, so most
+	// GetHistorySince calls return zero messages quickly. The 4-wide
+	// concurrency cap bounds the cost.
+	if h.wsCtx != nil && h.db != nil && h.wsCtx.Client != nil {
+		if h.backfillGate.tryStart(time.Now()) {
+			wctx := h.wsCtx
+			workspaceID := h.workspaceID
+			program := h.program
+			db := h.db
+			go func() {
+				bf := newBackfiller(wctx.Client, db, workspaceID, wctx.Client.UserID(), program, 4, 500)
+				_ = bf.run(context.Background())
+			}()
+		} else {
+			debuglog.Backfill("team=%s trigger=reconnect skipped reason=dedupe", h.workspaceID)
 		}
 	}
 }

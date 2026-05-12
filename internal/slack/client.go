@@ -453,6 +453,80 @@ func (c *Client) GetOlderHistory(ctx context.Context, channelID string, limit in
 	return resp.Messages, nil
 }
 
+// GetHistorySince fetches all messages newer than `oldest` in the
+// channel, paginating forward via response_metadata.next_cursor.
+// Stops when has_more is false or when the cumulative message count
+// reaches maxTotal (a hard cap that protects against runaway
+// backfills after very long disconnects in busy channels).
+//
+// Returns messages in the order Slack delivered them (newest-first
+// per page, oldest page first since pagination walks forward through
+// time). Callers that need oldest-first order should reverse the
+// slice.
+//
+// If oldest == "", behaves like a single GetHistory call (no
+// pagination) and returns at most maxTotal messages from the latest
+// page. This matches the spec's "synced_at == 0 → fetch latest page
+// only" rule for first-sync channels.
+func (c *Client) GetHistorySince(ctx context.Context, channelID, oldest string, maxTotal int) ([]slack.Message, error) {
+	if maxTotal <= 0 {
+		maxTotal = 500
+	}
+
+	// No prior sync — fetch latest page only.
+	if oldest == "" {
+		params := &slack.GetConversationHistoryParameters{
+			ChannelID: channelID,
+			Limit:     200,
+		}
+		resp, err := c.api.GetConversationHistory(params)
+		if err != nil {
+			return nil, fmt.Errorf("get history (no oldest): %w", err)
+		}
+		if len(resp.Messages) > maxTotal {
+			return resp.Messages[:maxTotal], nil
+		}
+		return resp.Messages, nil
+	}
+
+	var all []slack.Message
+	cursor := ""
+	for {
+		params := &slack.GetConversationHistoryParameters{
+			ChannelID: channelID,
+			Oldest:    oldest,
+			Limit:     200,
+			Cursor:    cursor,
+		}
+		resp, err := c.api.GetConversationHistory(params)
+		if err != nil {
+			// Rate-limit retry mirrors GetChannels' pattern.
+			if rlErr, ok := err.(*slack.RateLimitedError); ok {
+				wait := rlErr.RetryAfter
+				if wait == 0 {
+					wait = 30 * time.Second
+				}
+				select {
+				case <-ctx.Done():
+					return all, ctx.Err()
+				case <-time.After(wait):
+				}
+				continue
+			}
+			return all, fmt.Errorf("get history since %s: %w", oldest, err)
+		}
+
+		all = append(all, resp.Messages...)
+		if len(all) >= maxTotal {
+			return all[:maxTotal], nil
+		}
+		if !resp.HasMore || resp.ResponseMetaData.NextCursor == "" {
+			return all, nil
+		}
+		cursor = resp.ResponseMetaData.NextCursor
+	}
+}
+
 // GetUsers retrieves all users in the workspace.
 func (c *Client) GetUsers(ctx context.Context) ([]slack.User, error) {
 	users, err := c.api.GetUsersContext(ctx)

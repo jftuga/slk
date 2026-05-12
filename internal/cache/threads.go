@@ -1,6 +1,7 @@
 package cache
 
 import (
+	"database/sql"
 	"fmt"
 	"sort"
 )
@@ -26,7 +27,7 @@ type ThreadSummary struct {
 // (selfUserID) authored the parent, posted a reply, or was @-mentioned
 // (`<@UID>`) anywhere in the thread.
 //
-// Ordering: unread first, then newest LastReplyTS first.
+// Ordering: newest LastReplyTS first.
 //
 // Unread heuristic: LastReplyTS > channel.last_read_ts AND LastReplyBy != self.
 // This is approximate; v2 will replace it with subscriptions.thread state.
@@ -99,12 +100,43 @@ GROUP BY m.channel_id, m.thread_ts
 		return nil, err
 	}
 
-	// Order: unread DESC, last_reply_ts DESC.
+	// Order: newest LastReplyTS first. The Unread field is still
+	// computed and returned so the UI can render the dot indicator,
+	// but it no longer participates in ordering. The previous
+	// "unread first" tier produced confusing results when
+	// channels.last_read_ts was empty (string compare LastReplyTS >
+	// "" was always true), pushing genuinely-recent activity below
+	// older activity. See
+	// docs/superpowers/specs/2026-05-11-reconnect-backfill-and-threads-sort-design.md
+	// for context.
 	sort.SliceStable(out, func(i, j int) bool {
-		if out[i].Unread != out[j].Unread {
-			return out[i].Unread
-		}
 		return out[i].LastReplyTS > out[j].LastReplyTS
 	})
 	return out, nil
+}
+
+// ThreadInvolvesUser reports whether the given thread (identified by
+// workspaceID, channelID, threadTS) has any cached message authored
+// by selfUserID or containing the angle-bracketed mention "<@selfUserID>".
+// Mirrors the involvement predicate used by ListInvolvedThreads. Used
+// by the reconnect backfill to filter which threads warrant a
+// conversations.replies catch-up call.
+func (db *DB) ThreadInvolvesUser(workspaceID, channelID, threadTS, selfUserID string) (bool, error) {
+	mention := "%<@" + selfUserID + ">%"
+	const q = `
+SELECT 1 FROM messages
+WHERE workspace_id = ? AND channel_id = ? AND thread_ts = ?
+  AND is_deleted = 0
+  AND (user_id = ? OR text LIKE ?)
+LIMIT 1
+`
+	var one int
+	err := db.conn.QueryRow(q, workspaceID, channelID, threadTS, selfUserID, mention).Scan(&one)
+	if err == sql.ErrNoRows {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("checking thread involvement: %w", err)
+	}
+	return true, nil
 }

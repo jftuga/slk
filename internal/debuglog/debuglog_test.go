@@ -95,6 +95,7 @@ func TestCategoryPrefixes(t *testing.T) {
 	ImgRender("imgrender-line %d", 3)
 	WS("ws-line %d", 4)
 	General("general-line %d", 5)
+	Backfill("backfill-line %d", 6)
 
 	body, err := os.ReadFile(filepath.Join(dir, "slk-debug.log"))
 	if err != nil {
@@ -107,6 +108,7 @@ func TestCategoryPrefixes(t *testing.T) {
 		"[imgrender] imgrender-line 3",
 		"[ws] ws-line 4",
 		"[general] general-line 5",
+		"[backfill] backfill-line 6",
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("log missing %q\nfull output:\n%s", want, out)

@@ -12,6 +12,7 @@
 //   - ImgFetch  — image fetcher lifecycle
 //   - ImgRender — image render sizing + protocol decisions
 //   - WS        — websocket events
+//   - Backfill  — reconnect-driven history backfill
 //   - General   — misc / catch-all
 //
 // All output goes to a single file. Categories are encoded as inline
@@ -88,6 +89,15 @@ func Cache(format string, args ...any) {
 		return
 	}
 	logger.Printf("[cache] "+format, args...)
+}
+
+// Backfill logs a message tagged [backfill] for reconnect-driven
+// history and thread-reply catch-up. No-op when !Enabled().
+func Backfill(format string, args ...any) {
+	if !enabled.Load() {
+		return
+	}
+	logger.Printf("[backfill] "+format, args...)
 }
 
 // ImgFetch logs a message tagged [imgfetch] for image fetcher

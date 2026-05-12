@@ -1,9 +1,33 @@
 package cache
 
 import (
+	"database/sql"
 	"fmt"
 	"testing"
 )
+
+func TestGetMessage_ReturnsRowOrErrNoRows(t *testing.T) {
+	db := setupDBWithWorkspace(t)
+	defer db.Close()
+	db.UpsertChannel(Channel{ID: "C1", WorkspaceID: "T1", Name: "general", Type: "channel"})
+	db.UpsertMessage(Message{TS: "1.000000", ChannelID: "C1", WorkspaceID: "T1", UserID: "U1", Text: "hi", Subtype: "thread_broadcast"})
+
+	got, err := db.GetMessage("C1", "1.000000")
+	if err != nil {
+		t.Fatalf("GetMessage: %v", err)
+	}
+	if got.TS != "1.000000" || got.UserID != "U1" || got.Text != "hi" || got.Subtype != "thread_broadcast" {
+		t.Errorf("got %+v, want filled message", got)
+	}
+
+	_, err = db.GetMessage("C1", "999.000000")
+	if err == nil {
+		t.Fatal("GetMessage of missing row should return error")
+	}
+	if err != sql.ErrNoRows {
+		t.Errorf("got %v, want sql.ErrNoRows", err)
+	}
+}
 
 func TestUpsertAndGetMessages(t *testing.T) {
 	db := setupDBWithWorkspace(t)

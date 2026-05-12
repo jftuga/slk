@@ -90,6 +90,24 @@ func (db *DB) GetMessages(channelID string, limit int, beforeTS string) ([]Messa
 	return db.queryMessages(query, args...)
 }
 
+// GetMessage returns the message with the given (channel_id, ts) primary
+// key. Returns sql.ErrNoRows if no such message exists.
+func (db *DB) GetMessage(channelID, ts string) (Message, error) {
+	var m Message
+	var isDeleted int
+	err := db.conn.QueryRow(`
+		SELECT ts, channel_id, workspace_id, user_id, text, thread_ts, reply_count, edited_at, is_deleted, raw_json, created_at, subtype
+		FROM messages
+		WHERE channel_id = ? AND ts = ?
+	`, channelID, ts).Scan(&m.TS, &m.ChannelID, &m.WorkspaceID, &m.UserID, &m.Text,
+		&m.ThreadTS, &m.ReplyCount, &m.EditedAt, &isDeleted, &m.RawJSON, &m.CreatedAt, &m.Subtype)
+	if err != nil {
+		return m, err
+	}
+	m.IsDeleted = isDeleted == 1
+	return m, nil
+}
+
 func (db *DB) GetThreadReplies(channelID, threadTS string) ([]Message, error) {
 	query := `
 		SELECT ts, channel_id, workspace_id, user_id, text, thread_ts, reply_count, edited_at, is_deleted, raw_json, created_at, subtype
