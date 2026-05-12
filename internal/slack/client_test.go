@@ -132,6 +132,7 @@ func TestSendMessage_EmptyTextSendsNoBlocks(t *testing.T) {
 // Function fields allow tests to override default behavior.
 type mockSlackAPI struct {
 	authTestFn               func() (*slack.AuthTestResponse, error)
+	getConversationHistoryFn func(params *slack.GetConversationHistoryParameters) (*slack.GetConversationHistoryResponse, error)
 	getConversationRepliesFn func(params *slack.GetConversationRepliesParameters) ([]slack.Message, bool, string, error)
 	getEmojiFn               func() (map[string]string, error)
 	getPermalinkContextFn    func(ctx context.Context, params *slack.PermalinkParameters) (string, error)
@@ -153,6 +154,9 @@ func (m *mockSlackAPI) GetConversationsForUser(params *slack.GetConversationsFor
 }
 
 func (m *mockSlackAPI) GetConversationHistory(params *slack.GetConversationHistoryParameters) (*slack.GetConversationHistoryResponse, error) {
+	if m.getConversationHistoryFn != nil {
+		return m.getConversationHistoryFn(params)
+	}
 	return nil, nil
 }
 
@@ -1483,5 +1487,142 @@ func TestEditMessage_BuildsRichTextBlock(t *testing.T) {
 	}
 	if form.Get("blocks") == "" {
 		t.Error("blocks form value empty; expected rich_text block")
+	}
+}
+
+func TestGetHistorySince_PaginatesUntilExhausted(t *testing.T) {
+	page1 := []slack.Message{
+		{Msg: slack.Msg{Timestamp: "100.000000", User: "U1", Text: "a"}},
+		{Msg: slack.Msg{Timestamp: "200.000000", User: "U1", Text: "b"}},
+	}
+	page2 := []slack.Message{
+		{Msg: slack.Msg{Timestamp: "300.000000", User: "U1", Text: "c"}},
+	}
+	var calls []slack.GetConversationHistoryParameters
+	resp1 := &slack.GetConversationHistoryResponse{Messages: page1, HasMore: true}
+	resp1.ResponseMetaData.NextCursor = "cur1"
+	resp2 := &slack.GetConversationHistoryResponse{Messages: page2, HasMore: false}
+	responses := []*slack.GetConversationHistoryResponse{resp1, resp2}
+	mock := &mockSlackAPI{
+		getConversationHistoryFn: func(params *slack.GetConversationHistoryParameters) (*slack.GetConversationHistoryResponse, error) {
+			calls = append(calls, *params)
+			if len(responses) == 0 {
+				t.Fatalf("unexpected extra call to GetConversationHistory: %+v", params)
+			}
+			resp := responses[0]
+			responses = responses[1:]
+			return resp, nil
+		},
+	}
+	c := &Client{api: mock}
+
+	msgs, err := c.GetHistorySince(context.Background(), "C1", "50.000000", 500)
+	if err != nil {
+		t.Fatalf("GetHistorySince: %v", err)
+	}
+	if len(msgs) != 3 {
+		t.Errorf("got %d messages, want 3", len(msgs))
+	}
+	if len(calls) != 2 {
+		t.Fatalf("expected 2 history calls, got %d", len(calls))
+	}
+	if calls[0].Oldest != "50.000000" || calls[0].Cursor != "" {
+		t.Errorf("call[0] = %+v, want Oldest=50.000000, Cursor=''", calls[0])
+	}
+	if calls[1].Cursor != "cur1" {
+		t.Errorf("call[1].Cursor = %q, want %q", calls[1].Cursor, "cur1")
+	}
+}
+
+func TestGetHistorySince_RespectsHardCap(t *testing.T) {
+	// 3 pages of 2 messages each = 6 available; cap=4 should stop early.
+	mkPage := func(start int, hasMore bool, cursor string) *slack.GetConversationHistoryResponse {
+		r := &slack.GetConversationHistoryResponse{
+			Messages: []slack.Message{
+				{Msg: slack.Msg{Timestamp: fmt.Sprintf("%d.000000", start), User: "U1"}},
+				{Msg: slack.Msg{Timestamp: fmt.Sprintf("%d.000000", start+1), User: "U1"}},
+			},
+			HasMore: hasMore,
+		}
+		r.ResponseMetaData.NextCursor = cursor
+		return r
+	}
+	responses := []*slack.GetConversationHistoryResponse{
+		mkPage(100, true, "c1"),
+		mkPage(200, true, "c2"),
+		mkPage(300, false, ""),
+	}
+	var calls int
+	mock := &mockSlackAPI{
+		getConversationHistoryFn: func(params *slack.GetConversationHistoryParameters) (*slack.GetConversationHistoryResponse, error) {
+			if calls >= len(responses) {
+				t.Fatalf("unexpected call #%d (cap should have stopped earlier)", calls+1)
+			}
+			resp := responses[calls]
+			calls++
+			return resp, nil
+		},
+	}
+	c := &Client{api: mock}
+
+	msgs, err := c.GetHistorySince(context.Background(), "C1", "0", 4)
+	if err != nil {
+		t.Fatalf("GetHistorySince: %v", err)
+	}
+	if len(msgs) != 4 {
+		t.Errorf("got %d, want 4 (cap)", len(msgs))
+	}
+	if calls != 2 {
+		t.Errorf("expected 2 calls before cap stop, got %d", calls)
+	}
+}
+
+func TestGetHistorySince_EmptyOldestFetchesLatestPageOnly(t *testing.T) {
+	var calls []slack.GetConversationHistoryParameters
+	mock := &mockSlackAPI{
+		getConversationHistoryFn: func(params *slack.GetConversationHistoryParameters) (*slack.GetConversationHistoryResponse, error) {
+			calls = append(calls, *params)
+			r := &slack.GetConversationHistoryResponse{
+				Messages: []slack.Message{
+					{Msg: slack.Msg{Timestamp: "100.000000", User: "U1"}},
+				},
+				HasMore: true, // server says more pages exist...
+			}
+			r.ResponseMetaData.NextCursor = "shouldnotbeused"
+			return r, nil
+		},
+	}
+	c := &Client{api: mock}
+
+	// When oldest is empty (no prior sync), fetch latest page only — do NOT paginate.
+	msgs, err := c.GetHistorySince(context.Background(), "C1", "", 500)
+	if err != nil {
+		t.Fatalf("GetHistorySince: %v", err)
+	}
+	if len(msgs) != 1 {
+		t.Errorf("got %d msgs, want 1", len(msgs))
+	}
+	if len(calls) != 1 {
+		t.Errorf("expected 1 call (no pagination when oldest is empty), got %d", len(calls))
+	}
+	if calls[0].Oldest != "" {
+		t.Errorf("call.Oldest = %q, want empty", calls[0].Oldest)
+	}
+}
+
+func TestGetHistorySince_NoMessages(t *testing.T) {
+	mock := &mockSlackAPI{
+		getConversationHistoryFn: func(params *slack.GetConversationHistoryParameters) (*slack.GetConversationHistoryResponse, error) {
+			return &slack.GetConversationHistoryResponse{Messages: nil, HasMore: false}, nil
+		},
+	}
+	c := &Client{api: mock}
+
+	msgs, err := c.GetHistorySince(context.Background(), "C1", "100.000000", 500)
+	if err != nil {
+		t.Fatalf("GetHistorySince: %v", err)
+	}
+	if len(msgs) != 0 {
+		t.Errorf("expected empty, got %+v", msgs)
 	}
 }
