@@ -116,8 +116,9 @@ func (k *KittyRenderer) RenderKey(key string, target image.Point) Render {
 	}
 	if fresh {
 		// Only resize+encode when the image is actually being uploaded.
-		// On repeat calls (fresh=false) the registered ID is reused;
-		// no need to re-do the bilinear downscale or PNG encode.
+		// On repeat calls (fresh=false) the registered ID has already
+		// been confirmed delivered via MarkUploaded; no need to re-do
+		// the bilinear downscale or PNG encode.
 		pxW := target.X * 8
 		pxH := target.Y * 16
 		resized := image.NewRGBA(image.Rect(0, 0, pxW, pxH))
@@ -128,9 +129,15 @@ func (k *KittyRenderer) RenderKey(key string, target image.Point) Render {
 			imgID := id
 			cellsCols := target.X
 			cellsRows := target.Y
-			// fired guards against re-emission. viewEntry.flushes captures
-			// this closure; without the guard, every frame re-uploads the
-			// image (which is benign per protocol but wastes bandwidth).
+			reg := k.registry
+			// fired guards against per-closure double-emission (e.g. the
+			// same viewEntry being flushed twice in one frame). The
+			// registry's MarkUploaded guards against double-emission
+			// across DIFFERENT closures for the same (key, target) —
+			// without that, a cache rebuild that discards an unfired
+			// closure (e.g. SetMessages on the messages pane) would
+			// leave the registry thinking the upload had landed when in
+			// fact no bytes were ever sent.
 			var fired atomic.Bool
 			r.OnFlush = func(w io.Writer) error {
 				if !fired.CompareAndSwap(false, true) {
@@ -138,7 +145,11 @@ func (k *KittyRenderer) RenderKey(key string, target image.Point) Render {
 				}
 				debuglog.ImgRender("kitty.OnFlush: image_id=%d cells=(%d,%d) payload_len=%d",
 					imgID, cellsCols, cellsRows, len(payload))
-				return emitKittyUpload(w, imgID, payload, cellsCols, cellsRows)
+				if err := emitKittyUpload(w, imgID, payload, cellsCols, cellsRows); err != nil {
+					return err
+				}
+				reg.MarkUploaded(imgID)
+				return nil
 			}
 		}
 	}
