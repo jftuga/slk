@@ -717,7 +717,7 @@ type App struct {
 
 	// Callbacks
 	channelFetcher ChannelFetchFunc
-	// channelReadMarker fires Slack's MarkChannel + cache.UpdateLastReadTS
+	// channelReadMarker fires Slack's MarkChannel + cache.UpdateChannelReadState
 	// for the given channel up to ts. Returns a tea.Msg (typically
 	// ChannelMarkedReadMsg). Wired in cmd/slk/main.go's wireCallbacks.
 	// Tier 1 of ChannelSelectedMsg (cache fresh, no GetHistory) uses this
