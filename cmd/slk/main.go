@@ -830,6 +830,15 @@ func run() error {
 			return state
 		})
 
+		app.SetWorkspaceUnreadReader(func() []string {
+			ids, err := db.WorkspacesWithUnreads()
+			if err != nil {
+				log.Printf("Warning: WorkspacesWithUnreads: %v", err)
+				return nil
+			}
+			return ids
+		})
+
 		app.SetChannelVisitRecorder(func(channelID string) {
 			wctx := router.Active()
 			if wctx == nil {
@@ -2649,9 +2658,10 @@ func (h *rtmEventHandler) OnMessage(channelID, userID, ts, text, threadTS, subty
 
 	if h.isActive != nil && !h.isActive() {
 		// Inactive workspace — read state was already persisted above.
-		// The rail still needs to know an inactive workspace has new
-		// activity; that signal lives in WorkspaceUnreadMsg until the
-		// rail is rewired to derive from DB read state (Task 16).
+		// Fire a ReadStateChangedMsg so the workspace rail refreshes
+		// its dot from db.WorkspacesWithUnreads(). The sidebar's
+		// Invalidate is a no-op here because the active workspace's
+		// sidebar isn't showing this channel anyway.
 		if shouldMarkChannel {
 			debuglog.Cache("OnMessage: team=%s channel=%s ts=%s subtype=%q thread_ts=%s decision=inactive_workspace_persisted",
 				h.workspaceID, channelID, ts, subtype, threadTS)
@@ -2660,9 +2670,9 @@ func (h *rtmEventHandler) OnMessage(channelID, userID, ts, text, threadTS, subty
 				h.workspaceID, channelID, ts, subtype, threadTS)
 		}
 		if h.program != nil {
-			h.program.Send(ui.WorkspaceUnreadMsg{
-				TeamID:    h.workspaceID,
-				ChannelID: channelID,
+			h.program.Send(ui.ReadStateChangedMsg{
+				WorkspaceID: h.workspaceID,
+				ChannelID:   channelID,
 			})
 		}
 		return

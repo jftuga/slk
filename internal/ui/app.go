@@ -237,10 +237,6 @@ type (
 		// sidebar reverts to its existing name-keyed buckets).
 		SectionsProvider sidebar.SectionsProvider
 	}
-	WorkspaceUnreadMsg struct {
-		TeamID    string
-		ChannelID string
-	}
 	// ReadStateChangedMsg is sent whenever the persistent read state changes,
 	// so panels that read from cache.GetWorkspaceReadState re-render.
 	// ChannelID may be "" if the change is multi-channel (e.g., batch update
@@ -2217,13 +2213,12 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			cmds = append(cmds, func() tea.Msg { return fetcher(team) })
 		}
 
-	case WorkspaceUnreadMsg:
-		a.workspaceRail.SetUnread(msg.TeamID, true)
-
 	case ReadStateChangedMsg:
 		// Persistent read state changed in the cache. Invalidate the
-		// sidebar so the next render re-reads from the DB.
+		// sidebar and refresh the workspace rail so both re-read
+		// from the DB.
 		a.sidebar.Invalidate()
+		a.workspaceRail.RefreshUnreads()
 		return a, nil
 
 	case ConversationOpenedMsg:
@@ -4126,6 +4121,7 @@ func (a *App) SetInitialLastReadTS(ts string) {
 // Setters for external use (wiring services)
 func (a *App) SetWorkspaces(items []workspace.WorkspaceItem) {
 	a.workspaceRail.SetItems(items)
+	a.workspaceRail.RefreshUnreads()
 	a.workspaceItems = items
 	// Update workspace finder items
 	var finderItems []workspacefinder.Item
@@ -4281,6 +4277,13 @@ func (a *App) SetChannelLastReadFetcher(fn func(channelID string) string) {
 // Must be set before the first render for unread dots to appear.
 func (a *App) SetReadStateReader(f func() map[string]cache.ReadState) {
 	a.sidebar.SetReadStateReader(f)
+}
+
+// SetWorkspaceUnreadReader installs the callback the workspace rail
+// uses on RefreshUnreads to learn which workspaces have at least one
+// channel with has_unread=true.
+func (a *App) SetWorkspaceUnreadReader(f func() []string) {
+	a.workspaceRail.SetUnreadReader(f)
 }
 
 // SetChannelVisitRecorder wires the callback that persists a channel

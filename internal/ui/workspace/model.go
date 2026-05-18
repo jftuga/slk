@@ -19,6 +19,10 @@ type Model struct {
 	items    []WorkspaceItem
 	selected int
 	version  int64
+	// unreadReader returns the set of workspace IDs that currently
+	// have at least one channel with has_unread=true. Set by App via
+	// SetUnreadReader; called by RefreshUnreads.
+	unreadReader func() []string
 }
 
 // Version returns a counter that increments any time the View() output could
@@ -78,6 +82,35 @@ func (m *Model) SetUnread(teamID string, hasUnread bool) {
 			}
 			return
 		}
+	}
+}
+
+// SetUnreadReader installs the callback used by RefreshUnreads.
+func (m *Model) SetUnreadReader(f func() []string) {
+	m.unreadReader = f
+}
+
+// RefreshUnreads pulls the latest set of workspaces-with-unreads from
+// the reader and updates each item's HasUnread field. Called by App
+// on ReadStateChangedMsg. No-op if no reader is installed.
+func (m *Model) RefreshUnreads() {
+	if m.unreadReader == nil {
+		return
+	}
+	set := make(map[string]bool, len(m.items))
+	for _, id := range m.unreadReader() {
+		set[id] = true
+	}
+	changed := false
+	for i := range m.items {
+		want := set[m.items[i].ID]
+		if m.items[i].HasUnread != want {
+			m.items[i].HasUnread = want
+			changed = true
+		}
+	}
+	if changed {
+		m.dirty()
 	}
 }
 
