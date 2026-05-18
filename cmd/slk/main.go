@@ -1598,22 +1598,17 @@ func connectWorkspace(ctx context.Context, token slackclient.Token, db *cache.DB
 		debuglog.Cache("workspace_unread_bootstrap: team=%s GetUnreadCounts failed: %v", token.TeamName, ucErr)
 	}
 	wctx.ThreadsHasUnreads = threadsAgg.HasUnreads
-	unreadMap := make(map[string]int)
-	for _, u := range unreadCounts {
-		if u.HasUnread {
-			unreadMap[u.ChannelID] = u.Count
+	if ucErr == nil && len(unreadCounts) > 0 {
+		updates := make([]cache.ChannelReadStateUpdate, 0, len(unreadCounts))
+		for _, u := range unreadCounts {
+			updates = append(updates, cache.ChannelReadStateUpdate{
+				ChannelID:  u.ChannelID,
+				LastReadTS: u.LastRead, // may be ""; BatchUpdate preserves existing in that case
+				HasUnread:  u.HasUnread,
+			})
 		}
-		if u.LastRead != "" {
-			wctx.LastReadMap[u.ChannelID] = u.LastRead
-			_ = db.UpdateLastReadTS(u.ChannelID, u.LastRead)
-		}
-	}
-	for i := range wctx.Channels {
-		if count, ok := unreadMap[wctx.Channels[i].ID]; ok {
-			wctx.Channels[i].UnreadCount = count
-		}
-		if lr, ok := wctx.LastReadMap[wctx.Channels[i].ID]; ok {
-			wctx.Channels[i].LastReadTS = lr
+		if err := db.BatchUpdateChannelReadState(updates); err != nil {
+			log.Printf("Warning: bootstrap BatchUpdateChannelReadState for team=%s: %v", token.TeamName, err)
 		}
 	}
 	mutedItemCount := 0
