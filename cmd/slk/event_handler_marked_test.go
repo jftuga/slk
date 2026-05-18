@@ -38,6 +38,31 @@ func TestOnChannelMarked_WritesReadState(t *testing.T) {
 	}
 }
 
+func TestOnChannelMarked_InactiveWorkspace_StillWritesDB(t *testing.T) {
+	db := newTestDB(t)
+	if err := db.UpsertChannel(cache.Channel{ID: "C1", WorkspaceID: "T1", Name: "general", Type: "channel"}); err != nil {
+		t.Fatalf("UpsertChannel: %v", err)
+	}
+	if err := db.UpdateChannelReadState("C1", "1.0000", true); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	h := &rtmEventHandler{
+		db:          db,
+		wsCtx:       &WorkspaceContext{},
+		isActive:    func() bool { return false }, // inactive workspace
+		program:     nil,
+		workspaceID: "T1",
+	}
+	h.OnChannelMarked("C1", "1.0050", 0)
+	s, _ := db.GetChannelReadState("C1")
+	if s.HasUnread {
+		t.Errorf("HasUnread should be false even for inactive-workspace channel_marked")
+	}
+	if s.LastReadTS != "1.0050" {
+		t.Errorf("LastReadTS = %q, want %q", s.LastReadTS, "1.0050")
+	}
+}
+
 func TestMarkChannelReadAsync_UpdatesReadState(t *testing.T) {
 	// markChannelReadAsync runs its work in a goroutine and calls
 	// client.MarkChannel on a *slackclient.Client, which requires real

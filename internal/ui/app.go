@@ -1786,8 +1786,9 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				// channel already happened in the WS-handler path
 				// (cache.UpdateChannelReadState). Force the sidebar
 				// to re-read read state so the dot appears on the
-				// next render.
-				a.sidebar.Invalidate()
+				// next render, and refresh the workspace rail so its
+				// HasUnread flag picks up the change too.
+				a.notifyReadStateChanged()
 			} else {
 				debuglog.Cache("NewMessageMsg: channel=%s ts=%s decision=skipped_thread_reply_inactive",
 					msg.ChannelID, msg.Message.TS)
@@ -2097,7 +2098,7 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case ChannelMarkedReadMsg:
 		debuglog.Cache("ChannelMarkedReadMsg: channel=%s active=%s (optimistic clear)",
 			msg.ChannelID, a.activeChannelID)
-		a.sidebar.Invalidate()
+		a.notifyReadStateChanged()
 
 	case DMNameResolvedMsg:
 		items := a.sidebar.Items()
@@ -2217,8 +2218,7 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// Persistent read state changed in the cache. Invalidate the
 		// sidebar and refresh the workspace rail so both re-read
 		// from the DB.
-		a.sidebar.Invalidate()
-		a.workspaceRail.RefreshUnreads()
+		a.notifyReadStateChanged()
 		return a, nil
 
 	case ConversationOpenedMsg:
@@ -5561,6 +5561,16 @@ func (a *App) beginEditOfSelected() tea.Cmd {
 	return a.compose.Focus()
 }
 
+// notifyReadStateChanged invalidates the sidebar render cache and
+// refreshes the workspace rail's HasUnread flags. Call this whenever
+// per-channel read state is mutated via the DB API (i.e., wherever
+// a.sidebar.Invalidate() used to suffice). Pairing them prevents the
+// rail from going stale when the sidebar updates.
+func (a *App) notifyReadStateChanged() {
+	a.sidebar.Invalidate()
+	a.workspaceRail.RefreshUnreads()
+}
+
 // applyChannelMark updates local state for a channel-level read-state
 // change (used by both the local mark-unread press and the inbound
 // channel_marked WS event). channelID is the channel; ts is the new
@@ -5575,7 +5585,7 @@ func (a *App) applyChannelMark(channelID, ts string, unreadCount int) {
 	if channelID == a.activeChannelID {
 		a.messagepane.SetLastReadTS(ts)
 	}
-	a.sidebar.Invalidate()
+	a.notifyReadStateChanged()
 }
 
 // applyThreadMark updates local state for a thread-level read-state

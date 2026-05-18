@@ -2900,9 +2900,17 @@ func (h *rtmEventHandler) OnChannelMarked(channelID, ts string, unreadCount int)
 	if err := h.db.UpdateChannelReadState(channelID, ts, false); err != nil {
 		log.Printf("Warning: failed to update read state on channel_marked %s/%s: %v", channelID, ts, err)
 	}
+	if h.program != nil {
+		// Always notify so the workspace rail can refresh, regardless
+		// of whether this workspace is active. The active-workspace
+		// sidebar refresh and toast come from ChannelMarkedRemoteMsg
+		// below; the rail refresh comes from ReadStateChangedMsg's
+		// App.Update handler.
+		h.program.Send(ui.ReadStateChangedMsg{WorkspaceID: h.workspaceID, ChannelID: channelID})
+	}
 	if h.isActive != nil && !h.isActive() {
-		// Inactive workspace: nothing to draw, but the persistence
-		// above already updated state for when the user switches in.
+		// Inactive workspace: persistence + rail refresh above are
+		// the only visible effects; no sidebar/toast to update.
 		return
 	}
 	if h.program == nil {
