@@ -961,7 +961,6 @@ func run() error {
 				return nil
 			}
 			client := wctx.Client
-			lastReadMap := wctx.LastReadMap
 			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 			defer cancel()
 
@@ -969,10 +968,9 @@ func run() error {
 			if threadTS == "" {
 				err = client.MarkChannelUnread(ctx, channelID, boundaryTS)
 				if err == nil {
-					if dbErr := db.UpdateLastReadTS(channelID, boundaryTS); dbErr != nil {
-						log.Printf("Warning: failed to update last_read_ts %s/%s: %v", channelID, boundaryTS, dbErr)
+					if dbErr := db.UpdateChannelReadState(channelID, boundaryTS, true); dbErr != nil {
+						log.Printf("Warning: failed to update read state on mark-unread %s/%s: %v", channelID, boundaryTS, dbErr)
 					}
-					lastReadMap[channelID] = boundaryTS
 				} else {
 					log.Printf("Warning: failed to mark channel %s as unread (boundary %s): %v", channelID, boundaryTS, err)
 				}
