@@ -2876,11 +2876,8 @@ func (h *rtmEventHandler) OnDNDChange(enabled bool, endUnix int64) {
 func (h *rtmEventHandler) OnChannelMarked(channelID, ts string, unreadCount int) {
 	// Persist regardless of active workspace so the cache stays
 	// authoritative across workspace switches.
-	if err := h.db.UpdateLastReadTS(channelID, ts); err != nil {
-		log.Printf("Warning: failed to update last_read_ts on channel_marked %s/%s: %v", channelID, ts, err)
-	}
-	if h.wsCtx != nil && h.wsCtx.LastReadMap != nil {
-		h.wsCtx.LastReadMap[channelID] = ts
+	if err := h.db.UpdateChannelReadState(channelID, ts, false); err != nil {
+		log.Printf("Warning: failed to update read state on channel_marked %s/%s: %v", channelID, ts, err)
 	}
 	if h.isActive != nil && !h.isActive() {
 		// Inactive workspace: nothing to draw, but the persistence
