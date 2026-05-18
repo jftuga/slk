@@ -93,6 +93,7 @@ func (db *DB) migrate() error {
 		is_starred INTEGER NOT NULL DEFAULT 0,
 		last_read_ts TEXT NOT NULL DEFAULT '',
 		unread_count INTEGER NOT NULL DEFAULT 0,
+		has_unread INTEGER NOT NULL DEFAULT 0,
 		updated_at INTEGER NOT NULL DEFAULT 0,
 		FOREIGN KEY (workspace_id) REFERENCES workspaces(id)
 	);
@@ -186,6 +187,10 @@ func (db *DB) migrate() error {
 	}
 	if err := db.addColumnIfMissing("channels", "latest_synced_ts",
 		"ALTER TABLE channels ADD COLUMN latest_synced_ts TEXT NOT NULL DEFAULT ''"); err != nil {
+		return err
+	}
+	if err := db.addColumnIfMissing("channels", "has_unread",
+		"ALTER TABLE channels ADD COLUMN has_unread INTEGER NOT NULL DEFAULT 0"); err != nil {
 		return err
 	}
 

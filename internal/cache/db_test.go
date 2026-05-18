@@ -48,6 +48,46 @@ func TestNewDBCreatesIndexes(t *testing.T) {
 	}
 }
 
+func TestMigration_AddsHasUnreadColumn(t *testing.T) {
+	db, err := New(":memory:")
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	defer db.Close()
+
+	rows, err := db.conn.Query("PRAGMA table_info(channels)")
+	if err != nil {
+		t.Fatalf("PRAGMA: %v", err)
+	}
+	defer rows.Close()
+
+	found := false
+	for rows.Next() {
+		var cid int
+		var name, ctype string
+		var notnull, pk int
+		var dflt sql.NullString
+		if err := rows.Scan(&cid, &name, &ctype, &notnull, &dflt, &pk); err != nil {
+			t.Fatalf("scan: %v", err)
+		}
+		if name == "has_unread" {
+			found = true
+			if ctype != "INTEGER" {
+				t.Errorf("has_unread type = %q, want INTEGER", ctype)
+			}
+			if notnull != 1 {
+				t.Errorf("has_unread NOT NULL = %d, want 1", notnull)
+			}
+			if !dflt.Valid || dflt.String != "0" {
+				t.Errorf("has_unread default = %v, want 0", dflt)
+			}
+		}
+	}
+	if !found {
+		t.Fatal("has_unread column not added")
+	}
+}
+
 // TestSubtypeMigrationOnPreExistingDB verifies that an existing
 // database created before the `subtype` column was added gets the
 // column added idempotently when New() is called against it.
