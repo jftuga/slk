@@ -40,6 +40,7 @@ import (
 	"github.com/gammons/slk/internal/ui/styles"
 	"github.com/gammons/slk/internal/ui/themeswitcher"
 	"github.com/gammons/slk/internal/ui/workspace"
+	"github.com/gammons/slk/internal/wake"
 	emoji "github.com/kyokomi/emoji/v2"
 	"github.com/slack-go/slack"
 	"golang.design/x/clipboard"
@@ -1410,6 +1411,23 @@ func run() error {
 			}
 		}(ot.Token)
 	}
+
+	// Wake-from-sleep detector. The WS read deadline is 60 s; sleeps
+	// shorter than that don't tear down the TCP connection, so
+	// OnConnect never fires and the read-state catch-up in
+	// runChannelPhase doesn't run. The clock-jump heuristic catches
+	// these short sleeps and forces a backfill per workspace.
+	wakeCtx, wakeCancel := context.WithCancel(context.Background())
+	defer wakeCancel()
+	go wake.New(10*time.Second, 5*time.Second, func(elapsed time.Duration) {
+		debuglog.Backfill("wake detected: elapsed=%v — triggering catch-up across all workspaces", elapsed)
+		for _, wctx := range router.all {
+			if wctx == nil || wctx.RTMHandler == nil {
+				continue
+			}
+			wctx.RTMHandler.triggerBackfill("wake")
+		}
+	}).Run(wakeCtx)
 
 	_, err = p.Run()
 
@@ -2833,23 +2851,43 @@ func (h *rtmEventHandler) OnConnect() {
 	// synced_at for freshly-bootstrapped channels is current, so most
 	// GetHistorySince calls return zero messages quickly. The 4-wide
 	// concurrency cap bounds the cost.
-	if h.wsCtx != nil && h.db != nil && h.wsCtx.Client != nil {
-		if h.backfillGate.tryStart(time.Now()) {
-			wctx := h.wsCtx
-			workspaceID := h.workspaceID
-			program := h.program
-			db := h.db
-			go func() {
-				bf := newBackfiller(
-					wctx.Client, db, workspaceID, wctx.Client.UserID(), program, 4, 500,
-					func(available bool) { wctx.SubscriptionsAvailable = available },
-				)
-				_ = bf.run(context.Background())
-			}()
-		} else {
-			debuglog.Backfill("team=%s trigger=reconnect skipped reason=dedupe", h.workspaceID)
-		}
+	h.triggerBackfill("reconnect")
+}
+
+// triggerBackfill kicks off a reconnect-style backfill pass for this
+// workspace, subject to the per-handler 30 s dedupe gate. Called by
+// OnConnect on every WS reconnect AND by the wake detector when the
+// system wakes from sleep (where the WS may not have torn down — a
+// short sleep can survive within the 60 s WS read deadline, so
+// OnConnect never fires and no catch-up would happen without an
+// explicit trigger).
+//
+// The dedupe gate is shared with OnConnect, so a wake event that
+// happens to coincide with a real WS reconnect runs the backfill
+// exactly once.
+//
+// Returns true if the backfill was started, false if the gate
+// suppressed it.
+func (h *rtmEventHandler) triggerBackfill(trigger string) bool {
+	if h.wsCtx == nil || h.db == nil || h.wsCtx.Client == nil {
+		return false
 	}
+	if !h.backfillGate.tryStart(time.Now()) {
+		debuglog.Backfill("team=%s trigger=%s skipped reason=dedupe", h.workspaceID, trigger)
+		return false
+	}
+	wctx := h.wsCtx
+	workspaceID := h.workspaceID
+	program := h.program
+	db := h.db
+	go func() {
+		bf := newBackfiller(
+			wctx.Client, db, workspaceID, wctx.Client.UserID(), program, 4, 500,
+			func(available bool) { wctx.SubscriptionsAvailable = available },
+		)
+		_ = bf.run(context.Background())
+	}()
+	return true
 }
 
 func (h *rtmEventHandler) OnDisconnect() {
