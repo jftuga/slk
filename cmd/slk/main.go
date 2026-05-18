@@ -2933,9 +2933,17 @@ func (h *rtmEventHandler) OnDNDChange(enabled bool, endUnix int64) {
 }
 
 func (h *rtmEventHandler) OnChannelMarked(channelID, ts string, unreadCount int) {
+	// Slack's *_marked events fire in BOTH directions: when the user
+	// reads a channel (unreadCount=0) AND when the user marks one
+	// unread (unreadCount>0). The event payload's
+	// `unread_count_display` tells us which case we're in. We must
+	// use it instead of always clearing the unread flag — the
+	// original spec hardcoded false here, which meant a remote
+	// mark-unread (via another client) silently cleared slk's dot.
+	hasUnread := unreadCount > 0
 	// Persist regardless of active workspace so the cache stays
 	// authoritative across workspace switches.
-	if err := h.db.UpdateChannelReadState(channelID, ts, false); err != nil {
+	if err := h.db.UpdateChannelReadState(channelID, ts, hasUnread); err != nil {
 		log.Printf("Warning: failed to update read state on channel_marked %s/%s: %v", channelID, ts, err)
 	}
 	if h.program != nil {
