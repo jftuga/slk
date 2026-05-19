@@ -1,0 +1,26 @@
+# golangci-lint configuration (v2 schema).
+# See https://golangci-lint.run/usage/configuration/
+version: "2"
+
+linters:
+  # Start with the default set (errcheck, govet, ineffassign, staticcheck,
+  # unused) and turn off what we don't want.
+  default: standard
+  disable:
+    # errcheck flags every unchecked error, including idiomatic patterns
+    # like `defer x.Close()` on a Read or `conn.SetReadDeadline` on a
+    # connection we already know is healthy. Too noisy for this codebase.
+    - errcheck
+
+  exclusions:
+    rules:
+      # Stylistic quick-fixes that suggest cosmetic rewrites. Real
+      # bug-detection checks (SAxxxx) remain on.
+      - linters: [staticcheck]
+        text: "QF1001:" # could apply De Morgan's law
+      - linters: [staticcheck]
+        text: "QF1003:" # could use tagged switch
+      - linters: [staticcheck]
+        text: "ST1023:" # should omit type from declaration; it will be inferred
+      - linters: [staticcheck]
+        text: "QF1011:" # could omit type from declaration; it will be inferred
