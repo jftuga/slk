@@ -11,10 +11,9 @@ func BenchmarkViewScroll(b *testing.B) {
 	channels := make([]ChannelItem, 100)
 	for i := range channels {
 		channels[i] = ChannelItem{
-			ID:          fmt.Sprintf("C%d", i),
-			Name:        fmt.Sprintf("channel-%d", i),
-			Type:        "channel",
-			UnreadCount: i % 5,
+			ID:   fmt.Sprintf("C%d", i),
+			Name: fmt.Sprintf("channel-%d", i),
+			Type: "channel",
 		}
 		if i%10 == 0 {
 			channels[i].Type = "dm"

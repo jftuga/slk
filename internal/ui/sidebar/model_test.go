@@ -4,13 +4,14 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/gammons/slk/internal/cache"
 	"github.com/gammons/slk/internal/ui/messages"
 )
 
 func TestSidebarView(t *testing.T) {
 	channels := []ChannelItem{
-		{ID: "C1", Name: "general", Type: "channel", UnreadCount: 0},
-		{ID: "C2", Name: "random", Type: "channel", UnreadCount: 3},
+		{ID: "C1", Name: "general", Type: "channel"},
+		{ID: "C2", Name: "random", Type: "channel"},
 		{ID: "C3", Name: "alice", Type: "dm", Presence: "active"},
 	}
 
@@ -197,71 +198,6 @@ func TestThreadsItem_SelectByIDClearsThreadsSelection(t *testing.T) {
 	}
 }
 
-func TestMarkUnread_IncrementsCount(t *testing.T) {
-	m := New([]ChannelItem{
-		{ID: "C1", Name: "general", Type: "channel", UnreadCount: 0},
-		{ID: "C2", Name: "random", Type: "channel", UnreadCount: 2},
-	})
-	m.MarkUnread("C1")
-	if got := m.Items()[0].UnreadCount; got != 1 {
-		t.Errorf("MarkUnread should bump UnreadCount from 0 to 1, got %d", got)
-	}
-	m.MarkUnread("C2")
-	if got := m.Items()[1].UnreadCount; got != 3 {
-		t.Errorf("MarkUnread should bump existing count from 2 to 3, got %d", got)
-	}
-}
-
-func TestMarkUnread_BumpsVersionAndInvalidatesCache(t *testing.T) {
-	m := New([]ChannelItem{{ID: "C1", Name: "general", Type: "channel"}})
-	// Prime the cache.
-	_ = m.View(10, 30)
-	v1 := m.Version()
-	m.MarkUnread("C1")
-	v2 := m.Version()
-	if v2 == v1 {
-		t.Errorf("MarkUnread should bump version, got %d -> %d", v1, v2)
-	}
-}
-
-func TestMarkUnread_UnknownChannelIsNoop(t *testing.T) {
-	m := New([]ChannelItem{{ID: "C1", Name: "general", Type: "channel"}})
-	v1 := m.Version()
-	m.MarkUnread("C-does-not-exist")
-	v2 := m.Version()
-	if v1 != v2 {
-		t.Errorf("MarkUnread on unknown channel should not bump version, got %d -> %d", v1, v2)
-	}
-}
-
-func TestMarkUnread_RendersDotAndBold(t *testing.T) {
-	m := New([]ChannelItem{{ID: "C1", Name: "general", Type: "channel", UnreadCount: 0}})
-	// Expand Channels so the channel row itself is rendered (otherwise
-	// the unread bump only changes the aggregate badge on the header).
-	m.ToggleCollapse("Channels")
-	before := m.View(10, 30)
-	// Find the line for "general" before bumping.
-	var beforeLine string
-	for _, line := range strings.Split(before, "\n") {
-		if strings.Contains(line, "general") {
-			beforeLine = line
-			break
-		}
-	}
-	m.MarkUnread("C1")
-	after := m.View(10, 30)
-	var afterLine string
-	for _, line := range strings.Split(after, "\n") {
-		if strings.Contains(line, "general") {
-			afterLine = line
-			break
-		}
-	}
-	if beforeLine == afterLine {
-		t.Errorf("expected sidebar render to change after MarkUnread; before=%q after=%q", beforeLine, afterLine)
-	}
-}
-
 func TestSidebarFilter(t *testing.T) {
 	channels := []ChannelItem{
 		{ID: "C1", Name: "general", Type: "channel"},
@@ -284,55 +220,6 @@ func TestSidebarFilter(t *testing.T) {
 	visible = m.VisibleItems()
 	if len(visible) != 3 {
 		t.Errorf("expected 3 items after clear filter, got %d", len(visible))
-	}
-}
-
-func TestSetUnreadCount_SetsExactValue(t *testing.T) {
-	m := New([]ChannelItem{
-		{ID: "C1", Name: "general", Section: "Channels"},
-	})
-
-	m.SetUnreadCount("C1", 7)
-
-	for _, it := range m.Items() {
-		if it.ID == "C1" {
-			if it.UnreadCount != 7 {
-				t.Errorf("expected UnreadCount=7, got %d", it.UnreadCount)
-			}
-			return
-		}
-	}
-	t.Fatal("C1 not found in items")
-}
-
-func TestSetUnreadCount_Zero_ClearsBadge(t *testing.T) {
-	m := New([]ChannelItem{{ID: "C1", Name: "general", Section: "Channels"}})
-	m.MarkUnread("C1")
-	m.MarkUnread("C1")
-	// preconditions: count is 2.
-
-	m.SetUnreadCount("C1", 0)
-
-	for _, it := range m.Items() {
-		if it.ID == "C1" {
-			if it.UnreadCount != 0 {
-				t.Errorf("expected UnreadCount=0, got %d", it.UnreadCount)
-			}
-			return
-		}
-	}
-}
-
-func TestSetUnreadCount_UnknownChannel_NoOp(t *testing.T) {
-	m := New([]ChannelItem{{ID: "C1", Name: "general", Section: "Channels"}})
-
-	// Should not panic, should not affect existing items.
-	m.SetUnreadCount("CDOESNOTEXIST", 5)
-
-	for _, it := range m.Items() {
-		if it.ID == "C1" && it.UnreadCount != 0 {
-			t.Errorf("untouched item changed: %d", it.UnreadCount)
-		}
 	}
 }
 
@@ -359,7 +246,7 @@ func TestUpsertItem_AddsNewChannel(t *testing.T) {
 
 func TestUpsertItem_UpdatesExistingChannel(t *testing.T) {
 	m := New(nil)
-	m.SetItems([]ChannelItem{{ID: "G1", Name: "old name", Type: "group_dm", UnreadCount: 3}})
+	m.SetItems([]ChannelItem{{ID: "G1", Name: "old name", Type: "group_dm"}})
 
 	m.UpsertItem(ChannelItem{ID: "G1", Name: "new name", Type: "group_dm"})
 
@@ -370,35 +257,22 @@ func TestUpsertItem_UpdatesExistingChannel(t *testing.T) {
 	if items[0].Name != "new name" {
 		t.Errorf("Name = %q, want %q", items[0].Name, "new name")
 	}
-	// UnreadCount must be preserved on update — Slack's mpim_open does
-	// not carry unread state, and clobbering a live count to 0 would
-	// erase the indicator we're trying to fix.
-	if items[0].UnreadCount != 3 {
-		t.Errorf("UnreadCount = %d, want 3 (preserved)", items[0].UnreadCount)
-	}
-}
-
-func TestUpsertItem_ThenMarkUnread(t *testing.T) {
-	m := New(nil)
-	m.SetItems([]ChannelItem{{ID: "C1", Name: "general", Type: "channel"}})
-	// Simulate the bug scenario: a new mpdm shows up via mpim_open,
-	// then a message arrives. MarkUnread must successfully bump the
-	// count on the freshly-upserted item.
-	m.UpsertItem(ChannelItem{ID: "G1", Name: "alice, bob", Type: "group_dm"})
-	m.MarkUnread("G1")
-
-	items := m.AllItems()
-	for _, it := range items {
-		if it.ID == "G1" && it.UnreadCount != 1 {
-			t.Errorf("G1 UnreadCount = %d, want 1", it.UnreadCount)
-		}
-	}
+	// Read state (HasUnread, LastReadTS) used to live on ChannelItem
+	// and needed preservation across upserts because Slack's mpim_open
+	// / im_created / group_joined payloads don't carry it. Those
+	// fields are gone now -- the read-state DB is the single source of
+	// truth -- so there's nothing for UpsertItem to preserve and
+	// nothing to assert here beyond the descriptive-field overwrite
+	// above.
 }
 
 func TestRender_UnreadDMRow_KeepsBoldAfterPrefixReset(t *testing.T) {
 	m := New(nil)
 	m.SetItems([]ChannelItem{
-		{ID: "D1", Name: "alice", Type: "dm", Presence: "active", UnreadCount: 1},
+		{ID: "D1", Name: "alice", Type: "dm", Presence: "active"},
+	})
+	m.SetReadStateReader(func() map[string]cache.ReadState {
+		return map[string]cache.ReadState{"D1": {HasUnread: true}}
 	})
 
 	out := m.View(20, 40)
@@ -421,7 +295,7 @@ func TestRender_UnreadDMRow_KeepsBoldAfterPrefixReset(t *testing.T) {
 func TestRender_ReadDMRow_DoesNotEmitBoldAfterReset(t *testing.T) {
 	m := New(nil)
 	m.SetItems([]ChannelItem{
-		{ID: "D1", Name: "alice", Type: "dm", Presence: "active", UnreadCount: 0},
+		{ID: "D1", Name: "alice", Type: "dm", Presence: "active"},
 	})
 
 	out := m.View(20, 40)
@@ -503,7 +377,7 @@ func TestRender_ReadThreadsRow_DoesNotEmitBoldAfterReset(t *testing.T) {
 func TestRender_ReadDMRow_RestoresMutedFgAfterPrefixReset(t *testing.T) {
 	m := New(nil)
 	m.SetItems([]ChannelItem{
-		{ID: "D1", Name: "alice", Type: "dm", Presence: "active", UnreadCount: 0},
+		{ID: "D1", Name: "alice", Type: "dm", Presence: "active"},
 	})
 	out := m.View(20, 40)
 
@@ -541,7 +415,10 @@ func TestRender_ReadDMRow_RestoresMutedFgAfterPrefixReset(t *testing.T) {
 func TestRender_UnreadDMRow_RestoresBrightFgAfterPrefixReset(t *testing.T) {
 	m := New(nil)
 	m.SetItems([]ChannelItem{
-		{ID: "D1", Name: "alice", Type: "dm", Presence: "active", UnreadCount: 1},
+		{ID: "D1", Name: "alice", Type: "dm", Presence: "active"},
+	})
+	m.SetReadStateReader(func() map[string]cache.ReadState {
+		return map[string]cache.ReadState{"D1": {HasUnread: true}}
 	})
 	out := m.View(20, 40)
 
@@ -576,7 +453,7 @@ func TestRender_UnreadDMRow_RestoresBrightFgAfterPrefixReset(t *testing.T) {
 func TestRender_ReadGroupDMRow_RestoresMutedFgAfterPrefixReset(t *testing.T) {
 	m := New(nil)
 	m.SetItems([]ChannelItem{
-		{ID: "G1", Name: "design-trio", Type: "group_dm", UnreadCount: 0},
+		{ID: "G1", Name: "design-trio", Type: "group_dm"},
 	})
 	out := m.View(20, 40)
 
@@ -773,5 +650,51 @@ func TestCollapseByID_IndependentFromConfigMode(t *testing.T) {
 	// but a custom "A" name has not been touched so it should be expanded.
 	if m.IsCollapsed("A") {
 		t.Errorf("collapse state for ID 'A' bled into config mode")
+	}
+}
+
+// TestView_RendersDotFromReadStateReader confirms the unread dot
+// indicator is driven by the readStateReader callback (the DB),
+// not by ChannelItem.UnreadCount. C1 has HasUnread=true via the
+// reader so its row should render the "●" glyph; C2 has
+// HasUnread=false and should not.
+func TestView_RendersDotFromReadStateReader(t *testing.T) {
+	m := New([]ChannelItem{
+		{ID: "C1", Name: "general", Type: "channel"},
+		{ID: "C2", Name: "random", Type: "channel"},
+	})
+	// Channels section starts collapsed by default; expand so the
+	// per-row dots are rendered (the collapsed-header aggregate
+	// badge uses a different glyph "•").
+	m.ToggleCollapse("Channels")
+	m.SetReadStateReader(func() map[string]cache.ReadState {
+		return map[string]cache.ReadState{
+			"C1": {HasUnread: true},
+			"C2": {HasUnread: false},
+		}
+	})
+
+	out := m.View(20, 30)
+	dotCount := strings.Count(out, "●")
+	if dotCount != 1 {
+		t.Errorf("expected exactly 1 unread dot, got %d. Output:\n%s", dotCount, out)
+	}
+}
+
+// TestView_MutedChannelNoDot confirms that a muted channel never
+// renders the unread dot even when HasUnread=true. Slack's contract:
+// muted = no notification surface.
+func TestView_MutedChannelNoDot(t *testing.T) {
+	m := New([]ChannelItem{
+		{ID: "C1", Name: "noisy", Type: "channel", IsMuted: true},
+	})
+	m.ToggleCollapse("Channels")
+	m.SetReadStateReader(func() map[string]cache.ReadState {
+		return map[string]cache.ReadState{"C1": {HasUnread: true}}
+	})
+
+	out := m.View(20, 30)
+	if strings.Count(out, "●") != 0 {
+		t.Errorf("muted channel should not show a dot. Output:\n%s", out)
 	}
 }

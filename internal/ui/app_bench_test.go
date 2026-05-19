@@ -20,10 +20,9 @@ func makeBenchApp() *App {
 	channels := make([]sidebar.ChannelItem, 100)
 	for i := range channels {
 		channels[i] = sidebar.ChannelItem{
-			ID:          fmt.Sprintf("C%d", i),
-			Name:        fmt.Sprintf("channel-%d", i),
-			Type:        "channel",
-			UnreadCount: i % 5,
+			ID:   fmt.Sprintf("C%d", i),
+			Name: fmt.Sprintf("channel-%d", i),
+			Type: "channel",
 		}
 	}
 	a.sidebar.SetItems(channels)

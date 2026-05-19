@@ -107,15 +107,34 @@ func newBackfiller(client historyFetcher, db *cache.DB, workspaceID, selfUserID 
 func (b *backfiller) runChannelPhase(ctx context.Context) error {
 	// Fetch the server's unread map first so we can include channels
 	// the user has never opened in slk (e.g., a brand-new DM that
-	// arrived during an offline window). Failures are non-fatal: we
-	// fall back to the cached-channels-only set.
+	// arrived during an offline window) AND so we can catch up the
+	// persistent read-state for channels the user has marked read in
+	// the official client during the offline window (Symptom 2).
+	// Failures are non-fatal: we fall back to the cached-channels-only
+	// set and skip the catch-up write.
 	var unreadIDs []string
 	if unreads, _, err := b.client.GetUnreadCounts(); err != nil {
 		debuglog.Backfill("team=%s GetUnreadCounts err=%v (falling back to cached-only)", b.workspaceID, err)
 	} else {
+		updates := make([]cache.ChannelReadStateUpdate, 0, len(unreads))
 		for _, u := range unreads {
+			updates = append(updates, cache.ChannelReadStateUpdate{
+				ChannelID:  u.ChannelID,
+				LastReadTS: u.LastRead,
+				HasUnread:  u.HasUnread,
+			})
 			if u.HasUnread {
 				unreadIDs = append(unreadIDs, u.ChannelID)
+			}
+		}
+		if len(updates) > 0 {
+			if err := b.db.BatchUpdateChannelReadState(updates); err != nil {
+				debuglog.Backfill("team=%s BatchUpdateChannelReadState err=%v", b.workspaceID, err)
+			} else if b.program != nil {
+				// Force the sidebar (and workspace rail, once wired in Task 16)
+				// to re-render with the freshly-caught-up read state. This is
+				// the catch-up notification for Symptom 2.
+				b.program.Send(ui.ReadStateChangedMsg{WorkspaceID: b.workspaceID})
 			}
 		}
 	}

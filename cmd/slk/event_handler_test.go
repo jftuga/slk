@@ -3,6 +3,7 @@ package main
 import (
 	"testing"
 
+	"github.com/gammons/slk/internal/cache"
 	"github.com/gammons/slk/internal/config"
 	"github.com/gammons/slk/internal/ui/channelfinder"
 	"github.com/gammons/slk/internal/ui/sidebar"
@@ -49,16 +50,22 @@ func TestOnConversationOpened_AppendsAndSends(t *testing.T) {
 }
 
 // TestOnConversationOpened_DedupesByID verifies that a re-delivered event for
-// an already-known channel updates the descriptive fields (Name) but preserves
-// live unread state (UnreadCount, LastReadTS). Same-ID Slack events arrive
-// duplicated in practice (e.g. im_open followed by im_created on first DM).
+// an already-known channel updates the descriptive fields (Name) in place
+// instead of double-adding the row. Same-ID Slack events arrive duplicated
+// in practice (e.g. im_open followed by im_created on first DM).
+//
+// Read state used to be mirrored on ChannelItem (UnreadCount, LastReadTS)
+// and required explicit preservation across this upsert. Those fields are
+// gone -- the read-state DB is the single source of truth -- so there's
+// nothing left to assert on that axis here. The descriptive-field
+// overwrite and FinderItems dedupe are the only behaviors that remain.
 func TestOnConversationOpened_DedupesByID(t *testing.T) {
 	wctx := &WorkspaceContext{
 		BotUserIDs:        map[string]bool{},
 		UserNames:         map[string]string{},
 		UserNamesByHandle: map[string]string{"alice": "Alice", "bob": "Bob"},
 		Channels: []sidebar.ChannelItem{
-			{ID: "G1", Name: "old", Type: "group_dm", UnreadCount: 5, LastReadTS: "1700000000.000000"},
+			{ID: "G1", Name: "old", Type: "group_dm"},
 		},
 		// Seed FinderItems so we can assert dedupe doesn't double-add.
 		FinderItems: []channelfinder.Item{
@@ -82,12 +89,6 @@ func TestOnConversationOpened_DedupesByID(t *testing.T) {
 
 	if len(wctx.Channels) != 1 {
 		t.Errorf("len(Channels) = %d, want 1 (deduped on ID)", len(wctx.Channels))
-	}
-	if wctx.Channels[0].UnreadCount != 5 {
-		t.Errorf("UnreadCount = %d, want 5 (preserved across update)", wctx.Channels[0].UnreadCount)
-	}
-	if wctx.Channels[0].LastReadTS != "1700000000.000000" {
-		t.Errorf("LastReadTS = %q, want preserved", wctx.Channels[0].LastReadTS)
 	}
 	if wctx.Channels[0].Name != "Alice, Bob" {
 		t.Errorf("Name = %q, want %q (updated descriptive field)", wctx.Channels[0].Name, "Alice, Bob")
@@ -137,67 +138,97 @@ func TestOnConversationOpened_InactiveWorkspace_PersistsContext(t *testing.T) {
 	}
 }
 
-func TestOnMessage_InactiveWorkspace_BumpsChannelUnreadCount(t *testing.T) {
-	wctx := &WorkspaceContext{
-		BotUserIDs: map[string]bool{},
-		UserNames:  map[string]string{},
-		Channels: []sidebar.ChannelItem{
-			{ID: "D1", Name: "alice", Type: "dm", UnreadCount: 0},
-			{ID: "C1", Name: "general", Type: "channel"},
-		},
-	}
-	h := &rtmEventHandler{
-		wsCtx:        wctx,
-		workspaceID:  "T1",
-		channelNames: map[string]string{"D1": "alice", "C1": "general"},
-		channelTypes: map[string]string{"D1": "dm", "C1": "channel"},
-		isActive:     func() bool { return false },
-		// db, program, notifier left nil — handler must guard.
-	}
-	h.OnMessage("D1", "U2", "1700000001.000000", "hi", "", "", false, nil, slack.Blocks{}, nil)
+// The OnMessage read-state matrix below replaces the pre-Task-10 trio
+// (InactiveWorkspace_BumpsChannelUnreadCount, ...ThreadReplyDoesNotBumpChannel,
+// ...ThreadBroadcastBumpsChannel), which asserted against the now-removed
+// wctx.Channels[i].UnreadCount in-memory bump. The DB-backed assertions
+// here exercise the actual contract (UpdateChannelReadState writes) and
+// also cover the new active-channel suppression dimension.
 
-	for _, ch := range wctx.Channels {
-		if ch.ID == "D1" && ch.UnreadCount != 1 {
-			t.Errorf("D1 UnreadCount = %d, want 1", ch.UnreadCount)
-		}
+func TestOnMessage_InactiveChannel_SetsHasUnread(t *testing.T) {
+	db := newTestDB(t)
+	_ = db.UpsertChannel(cache.Channel{ID: "C1", WorkspaceID: "T1", Name: "general", Type: "channel"})
+	h := &rtmEventHandler{
+		db:              db,
+		wsCtx:           &WorkspaceContext{},
+		isActive:        func() bool { return true },
+		activeChannelID: func() string { return "C2" }, // viewing a different channel
+	}
+	h.OnMessage("C1", "U1", "1.001", "hi", "", "", false, nil, slack.Blocks{}, nil)
+
+	s, _ := db.GetChannelReadState("C1")
+	if !s.HasUnread {
+		t.Errorf("HasUnread = false, want true for inactive-channel message")
 	}
 }
 
-func TestOnMessage_InactiveWorkspace_ThreadReplyDoesNotBumpChannel(t *testing.T) {
-	wctx := &WorkspaceContext{
-		Channels: []sidebar.ChannelItem{{ID: "C1", Name: "general", Type: "channel"}},
-	}
+func TestOnMessage_ActiveChannel_DoesNotSetHasUnread(t *testing.T) {
+	db := newTestDB(t)
+	_ = db.UpsertChannel(cache.Channel{ID: "C1", WorkspaceID: "T1", Name: "general", Type: "channel"})
 	h := &rtmEventHandler{
-		wsCtx:        wctx,
-		workspaceID:  "T1",
-		channelNames: map[string]string{"C1": "general"},
-		channelTypes: map[string]string{"C1": "channel"},
-		isActive:     func() bool { return false },
+		db:              db,
+		wsCtx:           &WorkspaceContext{},
+		isActive:        func() bool { return true },
+		activeChannelID: func() string { return "C1" }, // viewing the same channel
 	}
-	// thread_ts != ts and subtype != "thread_broadcast" → reply, must not bump.
-	h.OnMessage("C1", "U2", "1700000002.000000", "reply", "1700000001.000000", "", false, nil, slack.Blocks{}, nil)
+	h.OnMessage("C1", "U1", "1.001", "hi", "", "", false, nil, slack.Blocks{}, nil)
 
-	if wctx.Channels[0].UnreadCount != 0 {
-		t.Errorf("thread reply bumped channel unread; got %d", wctx.Channels[0].UnreadCount)
+	s, _ := db.GetChannelReadState("C1")
+	if s.HasUnread {
+		t.Errorf("HasUnread = true, want false (active-channel suppression)")
 	}
 }
 
-func TestOnMessage_InactiveWorkspace_ThreadBroadcastBumpsChannel(t *testing.T) {
-	wctx := &WorkspaceContext{
-		Channels: []sidebar.ChannelItem{{ID: "C1", Name: "general", Type: "channel"}},
-	}
+func TestOnMessage_InactiveWorkspace_StillSetsHasUnread(t *testing.T) {
+	db := newTestDB(t)
+	_ = db.UpsertChannel(cache.Channel{ID: "C1", WorkspaceID: "T1", Name: "general", Type: "channel"})
 	h := &rtmEventHandler{
-		wsCtx:        wctx,
-		workspaceID:  "T1",
-		channelNames: map[string]string{"C1": "general"},
-		channelTypes: map[string]string{"C1": "channel"},
-		isActive:     func() bool { return false },
+		db:              db,
+		wsCtx:           &WorkspaceContext{},
+		isActive:        func() bool { return false },
+		activeChannelID: func() string { return "" },
+		workspaceID:     "T1",
 	}
-	// thread_broadcast bumps the channel even though it's a reply.
-	h.OnMessage("C1", "U2", "1700000002.000000", "broadcast", "1700000001.000000", "thread_broadcast", false, nil, slack.Blocks{}, nil)
+	h.OnMessage("C1", "U1", "1.001", "hi", "", "", false, nil, slack.Blocks{}, nil)
 
-	if wctx.Channels[0].UnreadCount != 1 {
-		t.Errorf("thread_broadcast did not bump channel unread; got %d", wctx.Channels[0].UnreadCount)
+	s, _ := db.GetChannelReadState("C1")
+	if !s.HasUnread {
+		t.Errorf("HasUnread = false, want true (inactive workspace)")
+	}
+}
+
+func TestOnMessage_ThreadReply_DoesNotSetHasUnread(t *testing.T) {
+	db := newTestDB(t)
+	_ = db.UpsertChannel(cache.Channel{ID: "C1", WorkspaceID: "T1", Name: "general", Type: "channel"})
+	h := &rtmEventHandler{
+		db:              db,
+		wsCtx:           &WorkspaceContext{},
+		isActive:        func() bool { return true },
+		activeChannelID: func() string { return "C2" },
+	}
+	// threadTS != ts and not a broadcast subtype = non-broadcast thread reply.
+	h.OnMessage("C1", "U1", "1.002", "reply", "1.001", "", false, nil, slack.Blocks{}, nil)
+
+	s, _ := db.GetChannelReadState("C1")
+	if s.HasUnread {
+		t.Errorf("HasUnread = true, want false (non-broadcast thread reply)")
+	}
+}
+
+func TestOnMessage_ThreadBroadcast_SetsHasUnread(t *testing.T) {
+	db := newTestDB(t)
+	_ = db.UpsertChannel(cache.Channel{ID: "C1", WorkspaceID: "T1", Name: "general", Type: "channel"})
+	h := &rtmEventHandler{
+		db:              db,
+		wsCtx:           &WorkspaceContext{},
+		isActive:        func() bool { return true },
+		activeChannelID: func() string { return "C2" },
+	}
+	h.OnMessage("C1", "U1", "1.002", "ALL", "1.001", "thread_broadcast", false, nil, slack.Blocks{}, nil)
+
+	s, _ := db.GetChannelReadState("C1")
+	if !s.HasUnread {
+		t.Errorf("HasUnread = false, want true (thread_broadcast bumps channel)")
 	}
 }
 

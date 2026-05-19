@@ -197,12 +197,11 @@ func TestListSubscribedThreads_SortByLastReplyTSDesc(t *testing.T) {
 func TestListSubscribedThreads_UnreadUsesPerThreadLastRead(t *testing.T) {
 	const selfID = "U1"
 	db := setupDBWithWorkspace(t)
-	// Set the channel's last_read_ts to a value AFTER the last reply —
-	// the old heuristic would say "read", but the per-thread LastRead
-	// from thread_subscriptions says "unread".
+	// The per-thread LastRead from thread_subscriptions is the sole
+	// source of truth for thread unread state; the legacy channel-level
+	// last_read_ts heuristic was removed.
 	if err := db.UpsertChannel(Channel{
 		ID: "C1", WorkspaceID: "T1", Name: "general", Type: "channel", IsMember: true,
-		LastReadTS: "1700000999.000000",
 	}); err != nil {
 		t.Fatalf("UpsertChannel: %v", err)
 	}

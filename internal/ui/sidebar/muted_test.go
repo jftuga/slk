@@ -3,6 +3,8 @@ package sidebar
 import (
 	"strings"
 	"testing"
+
+	"github.com/gammons/slk/internal/cache"
 )
 
 // The unread blue dot is "●" (U+25CF). Muted-with-unreads channels
@@ -11,7 +13,10 @@ import (
 // muted row has activity, not the dot.
 func TestMutedChannel_SuppressesUnreadDot(t *testing.T) {
 	m := New([]ChannelItem{
-		{ID: "C1", Name: "noisy", Type: "channel", UnreadCount: 5, IsMuted: true},
+		{ID: "C1", Name: "noisy", Type: "channel", IsMuted: true},
+	})
+	m.SetReadStateReader(func() map[string]cache.ReadState {
+		return map[string]cache.ReadState{"C1": {HasUnread: true}}
 	})
 	m.ToggleCollapse("Channels") // expand so the row renders
 	view := m.View(10, 30)
@@ -31,12 +36,14 @@ func TestMutedChannel_SuppressesUnreadDot(t *testing.T) {
 	}
 }
 
-// Sanity: an unmuted channel with the same unread count *does* get
-// the dot. Guards against the suppression accidentally firing for
-// every row.
+// Sanity: an unmuted channel with unreads *does* get the dot. Guards
+// against the suppression accidentally firing for every row.
 func TestUnmutedChannel_StillGetsUnreadDot(t *testing.T) {
 	m := New([]ChannelItem{
-		{ID: "C1", Name: "noisy", Type: "channel", UnreadCount: 5, IsMuted: false},
+		{ID: "C1", Name: "noisy", Type: "channel", IsMuted: false},
+	})
+	m.SetReadStateReader(func() map[string]cache.ReadState {
+		return map[string]cache.ReadState{"C1": {HasUnread: true}}
 	})
 	m.ToggleCollapse("Channels")
 	view := m.View(10, 30)
@@ -56,22 +63,29 @@ func TestUnmutedChannel_StillGetsUnreadDot(t *testing.T) {
 	}
 }
 
-// Aggregate badge on a collapsed section header sums per-row unread
-// counts. Muted channels are explicitly excluded so the badge matches
-// the per-row treatment (no dot, dim foreground).
+// Aggregate badge on a collapsed section header counts
+// channels-with-unreads. Muted channels are explicitly excluded so the
+// badge matches the per-row treatment (no dot, dim foreground).
 func TestAggregateBadge_ExcludesMutedChannels(t *testing.T) {
 	m := New([]ChannelItem{
-		{ID: "C1", Name: "general", Type: "channel", UnreadCount: 2, IsMuted: false},
-		{ID: "C2", Name: "noisy", Type: "channel", UnreadCount: 5, IsMuted: true},
-		{ID: "C3", Name: "alerts", Type: "channel", UnreadCount: 3, IsMuted: false},
+		{ID: "C1", Name: "general", Type: "channel", IsMuted: false},
+		{ID: "C2", Name: "noisy", Type: "channel", IsMuted: true},
+		{ID: "C3", Name: "alerts", Type: "channel", IsMuted: false},
 	})
-	// Collapsed by default; aggregate badge should be 2+3=5 (excluding
-	// the muted C2's contribution of 5).
+	m.SetReadStateReader(func() map[string]cache.ReadState {
+		return map[string]cache.ReadState{
+			"C1": {HasUnread: true},
+			"C2": {HasUnread: true}, // muted: must not count
+			"C3": {HasUnread: true},
+		}
+	})
+	// Collapsed by default; aggregate counts 2 channels-with-unreads
+	// (C1 and C3); the muted C2 must not contribute.
 	view := m.View(15, 30)
-	if !strings.Contains(view, "•5") {
-		t.Errorf("expected aggregate badge •5 (muted excluded), got:\n%s", view)
+	if !strings.Contains(view, "•2") {
+		t.Errorf("expected aggregate badge •2 (muted excluded), got:\n%s", view)
 	}
-	if strings.Contains(view, "•10") {
+	if strings.Contains(view, "•3") {
 		t.Errorf("aggregate badge counted muted channel toward total:\n%s", view)
 	}
 }
@@ -81,8 +95,14 @@ func TestAggregateBadge_ExcludesMutedChannels(t *testing.T) {
 // a stray "•0" (or worse, the unmuted code path).
 func TestAggregateBadge_AllMutedDropsBadge(t *testing.T) {
 	m := New([]ChannelItem{
-		{ID: "C1", Name: "noisy", Type: "channel", UnreadCount: 9, IsMuted: true},
-		{ID: "C2", Name: "spammy", Type: "channel", UnreadCount: 4, IsMuted: true},
+		{ID: "C1", Name: "noisy", Type: "channel", IsMuted: true},
+		{ID: "C2", Name: "spammy", Type: "channel", IsMuted: true},
+	})
+	m.SetReadStateReader(func() map[string]cache.ReadState {
+		return map[string]cache.ReadState{
+			"C1": {HasUnread: true},
+			"C2": {HasUnread: true},
+		}
 	})
 	view := m.View(15, 30)
 	// Find the Channels header line.

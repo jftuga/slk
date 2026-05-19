@@ -40,6 +40,7 @@ import (
 	"github.com/gammons/slk/internal/ui/styles"
 	"github.com/gammons/slk/internal/ui/themeswitcher"
 	"github.com/gammons/slk/internal/ui/workspace"
+	"github.com/gammons/slk/internal/wake"
 	emoji "github.com/kyokomi/emoji/v2"
 	"github.com/slack-go/slack"
 	"golang.design/x/clipboard"
@@ -147,7 +148,6 @@ type WorkspaceContext struct {
 	// after a failed one. The UI uses it to decide whether to draw
 	// the "Threads list unavailable" banner.
 	SubscriptionsAvailable bool
-	LastReadMap       map[string]string
 	Channels    []sidebar.ChannelItem
 	// FinderItems is the merged list shown in the Ctrl+T finder. Initially
 	// contains only joined channels; the BrowseableChannelsLoadedMsg pipeline
@@ -805,7 +805,7 @@ func run() error {
 	// without any per-switch closure rebinding.
 	//
 	// Goroutines launched from inside a callback must capture
-	// workspace-scoped values (Client, LastReadMap, ...) into local
+	// workspace-scoped values (Client, UserNames, ...) into local
 	// vars BEFORE the `go func()` so they are not affected by a
 	// concurrent router.Set during the goroutine's lifetime.
 	wireCallbacks := func(router *workspaceRouter) {
@@ -814,7 +814,34 @@ func run() error {
 			if wctx == nil {
 				return ""
 			}
-			return wctx.LastReadMap[channelID]
+			state, err := db.GetChannelReadState(channelID)
+			if err != nil {
+				log.Printf("Warning: GetChannelReadState for %s: %v", channelID, err)
+				return ""
+			}
+			return state.LastReadTS
+		})
+
+		app.SetReadStateReader(func() map[string]cache.ReadState {
+			wctx := router.Active()
+			if wctx == nil {
+				return nil
+			}
+			state, err := db.GetWorkspaceReadState(wctx.TeamID)
+			if err != nil {
+				log.Printf("Warning: GetWorkspaceReadState for %s: %v", wctx.TeamID, err)
+				return nil
+			}
+			return state
+		})
+
+		app.SetWorkspaceUnreadReader(func() []string {
+			ids, err := db.WorkspacesWithUnreads()
+			if err != nil {
+				log.Printf("Warning: WorkspacesWithUnreads: %v", err)
+				return nil
+			}
+			return ids
 		})
 
 		app.SetChannelVisitRecorder(func(channelID string) {
@@ -872,7 +899,8 @@ func run() error {
 			}
 			msgItems := fetchChannelMessages(wctx.Client, channelID, db, wctx.UserNames, tsFormat, avatarCache, router)
 
-			lastReadTS := wctx.LastReadMap[channelID]
+			state, _ := db.GetChannelReadState(channelID)
+			lastReadTS := state.LastReadTS
 
 			// Mark channel as read up to the latest message
 			if len(msgItems) > 0 {
@@ -961,7 +989,6 @@ func run() error {
 				return nil
 			}
 			client := wctx.Client
-			lastReadMap := wctx.LastReadMap
 			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 			defer cancel()
 
@@ -969,10 +996,9 @@ func run() error {
 			if threadTS == "" {
 				err = client.MarkChannelUnread(ctx, channelID, boundaryTS)
 				if err == nil {
-					if dbErr := db.UpdateLastReadTS(channelID, boundaryTS); dbErr != nil {
-						log.Printf("Warning: failed to update last_read_ts %s/%s: %v", channelID, boundaryTS, dbErr)
+					if dbErr := db.UpdateChannelReadState(channelID, boundaryTS, true); dbErr != nil {
+						log.Printf("Warning: failed to update read state on mark-unread %s/%s: %v", channelID, boundaryTS, dbErr)
 					}
-					lastReadMap[channelID] = boundaryTS
 				} else {
 					log.Printf("Warning: failed to mark channel %s as unread (boundary %s): %v", channelID, boundaryTS, err)
 				}
@@ -1386,6 +1412,23 @@ func run() error {
 		}(ot.Token)
 	}
 
+	// Wake-from-sleep detector. The WS read deadline is 60 s; sleeps
+	// shorter than that don't tear down the TCP connection, so
+	// OnConnect never fires and the read-state catch-up in
+	// runChannelPhase doesn't run. The clock-jump heuristic catches
+	// these short sleeps and forces a backfill per workspace.
+	wakeCtx, wakeCancel := context.WithCancel(context.Background())
+	defer wakeCancel()
+	go wake.New(10*time.Second, 5*time.Second, func(elapsed time.Duration) {
+		debuglog.Backfill("wake detected: elapsed=%v — triggering catch-up across all workspaces", elapsed)
+		for _, wctx := range router.all {
+			if wctx == nil || wctx.RTMHandler == nil {
+				continue
+			}
+			wctx.RTMHandler.triggerBackfill("wake")
+		}
+	}).Run(wakeCtx)
+
 	_, err = p.Run()
 
 	// Clean up connection managers
@@ -1413,7 +1456,6 @@ func connectWorkspace(ctx context.Context, token slackclient.Token, db *cache.DB
 		AvatarURLs:           &sync.Map{},
 		UserNamesByHandle:    make(map[string]string),
 		BotUserIDs:           make(map[string]bool),
-		LastReadMap:          make(map[string]string),
 		CustomEmoji:          make(map[string]string),
 		LastVisitedByChannel: make(map[string]int64),
 	}
@@ -1600,22 +1642,17 @@ func connectWorkspace(ctx context.Context, token slackclient.Token, db *cache.DB
 		debuglog.Cache("workspace_unread_bootstrap: team=%s GetUnreadCounts failed: %v", token.TeamName, ucErr)
 	}
 	wctx.ThreadsHasUnreads = threadsAgg.HasUnreads
-	unreadMap := make(map[string]int)
-	for _, u := range unreadCounts {
-		if u.HasUnread {
-			unreadMap[u.ChannelID] = u.Count
+	if ucErr == nil && len(unreadCounts) > 0 {
+		updates := make([]cache.ChannelReadStateUpdate, 0, len(unreadCounts))
+		for _, u := range unreadCounts {
+			updates = append(updates, cache.ChannelReadStateUpdate{
+				ChannelID:  u.ChannelID,
+				LastReadTS: u.LastRead, // may be ""; BatchUpdate preserves existing in that case
+				HasUnread:  u.HasUnread,
+			})
 		}
-		if u.LastRead != "" {
-			wctx.LastReadMap[u.ChannelID] = u.LastRead
-			_ = db.UpdateLastReadTS(u.ChannelID, u.LastRead)
-		}
-	}
-	for i := range wctx.Channels {
-		if count, ok := unreadMap[wctx.Channels[i].ID]; ok {
-			wctx.Channels[i].UnreadCount = count
-		}
-		if lr, ok := wctx.LastReadMap[wctx.Channels[i].ID]; ok {
-			wctx.Channels[i].LastReadTS = lr
+		if err := db.BatchUpdateChannelReadState(updates); err != nil {
+			log.Printf("Warning: bootstrap BatchUpdateChannelReadState for team=%s: %v", token.TeamName, err)
 		}
 	}
 	mutedItemCount := 0
@@ -1626,33 +1663,23 @@ func connectWorkspace(ctx context.Context, token slackclient.Token, db *cache.DB
 	}
 	log.Printf("workspace %s: %d/%d channel items marked IsMuted after build", token.TeamName, mutedItemCount, len(wctx.Channels))
 
-	// Bootstrap-time unread/mute summary so a user can grep
-	// `[cache] workspace_unread_bootstrap` after launch and see what
-	// slk learned from client.counts vs. what the official Slack
-	// desktop client shows. Only per-channel-detail-log the unread
-	// ones; the muted-vs-unread aggregates are sufficient baseline
-	// for everything else.
+	// Bootstrap-time mute summary so a user can grep
+	// `[cache] workspace_unread_bootstrap` after launch and see how
+	// many channels are muted in this workspace. The per-channel
+	// unread detail log that used to live here was driven by
+	// ChannelItem.UnreadCount, which no longer exists -- unread state
+	// is now sourced exclusively from the read-state DB (see
+	// db.GetChannelReadState) and any equivalent dump would live
+	// alongside the DB write path in updateReadStateFromCounts.
 	if debuglog.Enabled() {
-		var unreadChans, mutedChans, unreadAndUnmuted int
+		var mutedChans int
 		for _, ch := range wctx.Channels {
-			if ch.UnreadCount > 0 {
-				unreadChans++
-				if !ch.IsMuted {
-					unreadAndUnmuted++
-				}
-			}
 			if ch.IsMuted {
 				mutedChans++
 			}
 		}
-		debuglog.Cache("workspace_unread_bootstrap: team=%s total=%d unread_count_>0=%d muted=%d unread_unmuted=%d threads_has_unreads=%v threads_unread=%d",
-			token.TeamName, len(wctx.Channels), unreadChans, mutedChans, unreadAndUnmuted, threadsAgg.HasUnreads, threadsAgg.UnreadCount)
-		for _, ch := range wctx.Channels {
-			if ch.UnreadCount > 0 {
-				debuglog.Cache("workspace_unread_bootstrap: team=%s channel=%s name=%q type=%s unread=%d last_read=%s muted=%v",
-					token.TeamName, ch.ID, ch.Name, ch.Type, ch.UnreadCount, ch.LastReadTS, ch.IsMuted)
-			}
-		}
+		debuglog.Cache("workspace_unread_bootstrap: team=%s total=%d muted=%d threads_has_unreads=%v threads_unread=%d",
+			token.TeamName, len(wctx.Channels), mutedChans, threadsAgg.HasUnreads, threadsAgg.UnreadCount)
 	}
 
 	// Finder items are built alongside the sidebar items in the loop above
@@ -2008,11 +2035,11 @@ func markChannelReadAsync(
 		return
 	}
 	client := wctx.Client
-	lastReadMap := wctx.LastReadMap
 	go func() {
 		_ = client.MarkChannel(ctx, channelID, ts)
-		_ = db.UpdateLastReadTS(channelID, ts)
-		lastReadMap[channelID] = ts
+		if err := db.UpdateChannelReadState(channelID, ts, false); err != nil {
+			log.Printf("Warning: failed to update read state in markChannelReadAsync %s/%s: %v", channelID, ts, err)
+		}
 		if p != nil {
 			p.Send(ui.ChannelMarkedReadMsg{ChannelID: channelID})
 		}
@@ -2616,38 +2643,48 @@ func (h *rtmEventHandler) OnMessage(channelID, userID, ts, text, threadTS, subty
 		}
 	}
 
+	// Read-state: mark the channel has_unread=true when a message
+	// arrives in a channel the user is NOT actively viewing. Mirrors
+	// Slack's channel-unread semantics — non-broadcast thread replies
+	// do not mark the parent channel unread (only top-level messages
+	// and thread_broadcast subtypes do). See internal/ui/app.go's
+	// thread-reply guard for the matching active-path treatment.
+	//
+	// This write runs for BOTH active and inactive workspaces; the
+	// active/inactive split below only governs the UI dispatch path,
+	// not durable read state. Task 10 of the read-state-sync plan
+	// consolidated the previously duplicated paths into this single
+	// gated write.
+	isThreadReply := threadTS != "" && threadTS != ts
+	isBroadcast := subtype == "thread_broadcast"
+	shouldMarkChannel := !isThreadReply || isBroadcast
+	activeChIDForRead := ""
+	if h.activeChannelID != nil {
+		activeChIDForRead = h.activeChannelID()
+	}
+	if h.db != nil && shouldMarkChannel && activeChIDForRead != channelID {
+		if err := h.db.UpdateChannelReadState(channelID, "", true); err != nil {
+			log.Printf("Warning: failed to set has_unread for %s: %v", channelID, err)
+		}
+	}
+
 	if h.isActive != nil && !h.isActive() {
-		// Inactive workspace — persist per-channel unread so a later
-		// workspace switch reflects the activity, then notify the rail.
-		//
-		// Skip thread replies that aren't broadcasts: per Slack's
-		// channel-unread semantics they don't mark the parent channel
-		// as unread (only top-level messages and thread_broadcast
-		// subtypes do). Mirrors the active-branch guard at
-		// internal/ui/app.go:1430-1431.
-		isThreadReply := threadTS != "" && threadTS != ts
-		isBroadcast := subtype == "thread_broadcast"
-		if !isThreadReply || isBroadcast {
-			countAfter := -1
-			if h.wsCtx != nil {
-				for i := range h.wsCtx.Channels {
-					if h.wsCtx.Channels[i].ID == channelID {
-						h.wsCtx.Channels[i].UnreadCount++
-						countAfter = h.wsCtx.Channels[i].UnreadCount
-						break
-					}
-				}
-			}
-			debuglog.Cache("OnMessage: team=%s channel=%s ts=%s subtype=%q thread_ts=%s decision=bumped_inactive_workspace count_after=%d",
-				h.workspaceID, channelID, ts, subtype, threadTS, countAfter)
+		// Inactive workspace — read state was already persisted above.
+		// Fire a ReadStateChangedMsg so the workspace rail refreshes
+		// its dot from db.WorkspacesWithUnreads(). The sidebar's
+		// Invalidate is a no-op here because the active workspace's
+		// sidebar isn't showing this channel anyway.
+		if shouldMarkChannel {
+			debuglog.Cache("OnMessage: team=%s channel=%s ts=%s subtype=%q thread_ts=%s decision=inactive_workspace_persisted",
+				h.workspaceID, channelID, ts, subtype, threadTS)
 		} else {
 			debuglog.Cache("OnMessage: team=%s channel=%s ts=%s subtype=%q thread_ts=%s decision=skipped_thread_reply_inactive",
 				h.workspaceID, channelID, ts, subtype, threadTS)
 		}
 		if h.program != nil {
-			h.program.Send(ui.WorkspaceUnreadMsg{
-				TeamID:    h.workspaceID,
-				ChannelID: channelID,
+			h.program.Send(ui.ReadStateChangedMsg{
+				WorkspaceID: h.workspaceID,
+				ChannelID:   channelID,
 			})
 		}
 		return
@@ -2662,22 +2699,24 @@ func (h *rtmEventHandler) OnMessage(channelID, userID, ts, text, threadTS, subty
 	}
 	debuglog.Cache("OnMessage: team=%s channel=%s ts=%s subtype=%q thread_ts=%s decision=dispatched_to_app",
 		h.workspaceID, channelID, ts, subtype, threadTS)
-	h.program.Send(ui.NewMessageMsg{
-		ChannelID: channelID,
-		Message: messages.MessageItem{
-			TS:                ts,
-			UserID:            userID,
-			UserName:          userName,
-			Text:              text,
-			Timestamp:         formatTimestamp(ts, h.tsFormat),
-			ThreadTS:          threadTS,
-			Subtype:           subtype,
-			IsEdited:          edited,
-			Attachments:       extractAttachments(files),
-			Blocks:            extractBlocks(blocks),
-			LegacyAttachments: extractLegacyAttachments(attachments),
-		},
-	})
+	if h.program != nil {
+		h.program.Send(ui.NewMessageMsg{
+			ChannelID: channelID,
+			Message: messages.MessageItem{
+				TS:                ts,
+				UserID:            userID,
+				UserName:          userName,
+				Text:              text,
+				Timestamp:         formatTimestamp(ts, h.tsFormat),
+				ThreadTS:          threadTS,
+				Subtype:           subtype,
+				IsEdited:          edited,
+				Attachments:       extractAttachments(files),
+				Blocks:            extractBlocks(blocks),
+				LegacyAttachments: extractLegacyAttachments(attachments),
+			},
+		})
+	}
 }
 
 func (h *rtmEventHandler) OnMessageDeleted(channelID, ts string) {
@@ -2812,23 +2851,43 @@ func (h *rtmEventHandler) OnConnect() {
 	// synced_at for freshly-bootstrapped channels is current, so most
 	// GetHistorySince calls return zero messages quickly. The 4-wide
 	// concurrency cap bounds the cost.
-	if h.wsCtx != nil && h.db != nil && h.wsCtx.Client != nil {
-		if h.backfillGate.tryStart(time.Now()) {
-			wctx := h.wsCtx
-			workspaceID := h.workspaceID
-			program := h.program
-			db := h.db
-			go func() {
-				bf := newBackfiller(
-					wctx.Client, db, workspaceID, wctx.Client.UserID(), program, 4, 500,
-					func(available bool) { wctx.SubscriptionsAvailable = available },
-				)
-				_ = bf.run(context.Background())
-			}()
-		} else {
-			debuglog.Backfill("team=%s trigger=reconnect skipped reason=dedupe", h.workspaceID)
-		}
+	h.triggerBackfill("reconnect")
+}
+
+// triggerBackfill kicks off a reconnect-style backfill pass for this
+// workspace, subject to the per-handler 30 s dedupe gate. Called by
+// OnConnect on every WS reconnect AND by the wake detector when the
+// system wakes from sleep (where the WS may not have torn down — a
+// short sleep can survive within the 60 s WS read deadline, so
+// OnConnect never fires and no catch-up would happen without an
+// explicit trigger).
+//
+// The dedupe gate is shared with OnConnect, so a wake event that
+// happens to coincide with a real WS reconnect runs the backfill
+// exactly once.
+//
+// Returns true if the backfill was started, false if the gate
+// suppressed it.
+func (h *rtmEventHandler) triggerBackfill(trigger string) bool {
+	if h.wsCtx == nil || h.db == nil || h.wsCtx.Client == nil {
+		return false
 	}
+	if !h.backfillGate.tryStart(time.Now()) {
+		debuglog.Backfill("team=%s trigger=%s skipped reason=dedupe", h.workspaceID, trigger)
+		return false
+	}
+	wctx := h.wsCtx
+	workspaceID := h.workspaceID
+	program := h.program
+	db := h.db
+	go func() {
+		bf := newBackfiller(
+			wctx.Client, db, workspaceID, wctx.Client.UserID(), program, 4, 500,
+			func(available bool) { wctx.SubscriptionsAvailable = available },
+		)
+		_ = bf.run(context.Background())
+	}()
+	return true
 }
 
 func (h *rtmEventHandler) OnDisconnect() {
@@ -2874,17 +2933,30 @@ func (h *rtmEventHandler) OnDNDChange(enabled bool, endUnix int64) {
 }
 
 func (h *rtmEventHandler) OnChannelMarked(channelID, ts string, unreadCount int) {
+	// Slack's *_marked events fire in BOTH directions: when the user
+	// reads a channel (unreadCount=0) AND when the user marks one
+	// unread (unreadCount>0). The event payload's
+	// `unread_count_display` tells us which case we're in. We must
+	// use it instead of always clearing the unread flag — the
+	// original spec hardcoded false here, which meant a remote
+	// mark-unread (via another client) silently cleared slk's dot.
+	hasUnread := unreadCount > 0
 	// Persist regardless of active workspace so the cache stays
 	// authoritative across workspace switches.
-	if err := h.db.UpdateLastReadTS(channelID, ts); err != nil {
-		log.Printf("Warning: failed to update last_read_ts on channel_marked %s/%s: %v", channelID, ts, err)
+	if err := h.db.UpdateChannelReadState(channelID, ts, hasUnread); err != nil {
+		log.Printf("Warning: failed to update read state on channel_marked %s/%s: %v", channelID, ts, err)
 	}
-	if h.wsCtx != nil && h.wsCtx.LastReadMap != nil {
-		h.wsCtx.LastReadMap[channelID] = ts
+	if h.program != nil {
+		// Always notify so the workspace rail can refresh, regardless
+		// of whether this workspace is active. The active-workspace
+		// sidebar refresh and toast come from ChannelMarkedRemoteMsg
+		// below; the rail refresh comes from ReadStateChangedMsg's
+		// App.Update handler.
+		h.program.Send(ui.ReadStateChangedMsg{WorkspaceID: h.workspaceID, ChannelID: channelID})
 	}
 	if h.isActive != nil && !h.isActive() {
-		// Inactive workspace: nothing to draw, but the persistence
-		// above already updated state for when the user switches in.
+		// Inactive workspace: persistence + rail refresh above are
+		// the only visible effects; no sidebar/toast to update.
 		return
 	}
 	if h.program == nil {
@@ -2964,12 +3036,12 @@ func (h *rtmEventHandler) OnConversationOpened(ch slack.Channel) {
 	// Persist in the workspace context so a workspace switch later
 	// shows the new conversation. De-dupe on ID — the same event can
 	// arrive twice (e.g. im_open followed by im_created on first DM).
+	// No read-state preservation is needed: those fields no longer
+	// live on ChannelItem; the read-state DB (per workspace) is the
+	// single source of truth and is unaffected by this in-memory upsert.
 	replaced := false
 	for i := range h.wsCtx.Channels {
 		if h.wsCtx.Channels[i].ID == item.ID {
-			// Preserve unread/last-read from the live context.
-			item.UnreadCount = h.wsCtx.Channels[i].UnreadCount
-			item.LastReadTS = h.wsCtx.Channels[i].LastReadTS
 			h.wsCtx.Channels[i] = item
 			replaced = true
 			break

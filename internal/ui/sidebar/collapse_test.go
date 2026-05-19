@@ -3,6 +3,8 @@ package sidebar
 import (
 	"strings"
 	"testing"
+
+	"github.com/gammons/slk/internal/cache"
 )
 
 func TestNew_DefaultCollapsesChannelsSection(t *testing.T) {
@@ -95,18 +97,27 @@ func TestNavigation_SkipsCollapsedSectionItems(t *testing.T) {
 
 func TestCollapsedHeader_ShowsAggregateUnreadBadge(t *testing.T) {
 	m := New([]ChannelItem{
-		{ID: "C1", Name: "general", Type: "channel", UnreadCount: 2},
-		{ID: "C2", Name: "random", Type: "channel", UnreadCount: 5},
+		{ID: "C1", Name: "general", Type: "channel"},
+		{ID: "C2", Name: "random", Type: "channel"},
 	})
-	// Channels is collapsed by default; aggregate badge should sum to 7.
+	// After the read-state sync rewrite, the aggregate counts
+	// channels-with-unreads (not the sum of per-channel counts), and
+	// the DB (read via readStateReader) is the source of truth.
+	m.SetReadStateReader(func() map[string]cache.ReadState {
+		return map[string]cache.ReadState{
+			"C1": {HasUnread: true},
+			"C2": {HasUnread: true},
+		}
+	})
+	// Channels is collapsed by default; aggregate badge should count 2.
 	view := m.View(15, 30)
-	if !strings.Contains(view, "•7") {
-		t.Errorf("collapsed header should show aggregate badge •7, got:\n%s", view)
+	if !strings.Contains(view, "•2") {
+		t.Errorf("collapsed header should show aggregate badge •2, got:\n%s", view)
 	}
 	// Expand, the badge disappears (per-channel dots take over).
 	m.ToggleCollapse("Channels")
 	view = m.View(15, 30)
-	if strings.Contains(view, "•7") {
+	if strings.Contains(view, "•2") {
 		t.Errorf("expanded header should not carry an aggregate badge:\n%s", view)
 	}
 }

@@ -237,9 +237,13 @@ type (
 		// sidebar reverts to its existing name-keyed buckets).
 		SectionsProvider sidebar.SectionsProvider
 	}
-	WorkspaceUnreadMsg struct {
-		TeamID    string
-		ChannelID string
+	// ReadStateChangedMsg is sent whenever the persistent read state changes,
+	// so panels that read from cache.GetWorkspaceReadState re-render.
+	// ChannelID may be "" if the change is multi-channel (e.g., batch update
+	// from reconnect catch-up).
+	ReadStateChangedMsg struct {
+		WorkspaceID string
+		ChannelID   string
 	}
 	// ConversationOpenedMsg is sent when Slack delivers an mpim_open,
 	// im_created, group_joined, or channel_joined event. The TeamID
@@ -518,7 +522,7 @@ type MessageMarkedUnreadMsg struct {
 // Slack pushes a channel_marked / im_marked / group_marked / mpim_marked
 // event (read state changed in another client, or via this client's own
 // mark echoing back). The handler has already persisted the new
-// last_read_ts to SQLite + the in-memory LastReadMap; the App's
+// last_read_ts to SQLite via cache.UpdateChannelReadState; the App's
 // Update arm only updates the UI. No toast.
 type ChannelMarkedRemoteMsg struct {
 	ChannelID   string
@@ -713,7 +717,7 @@ type App struct {
 
 	// Callbacks
 	channelFetcher ChannelFetchFunc
-	// channelReadMarker fires Slack's MarkChannel + cache.UpdateLastReadTS
+	// channelReadMarker fires Slack's MarkChannel + cache.UpdateChannelReadState
 	// for the given channel up to ts. Returns a tea.Msg (typically
 	// ChannelMarkedReadMsg). Wired in cmd/slk/main.go's wireCallbacks.
 	// Tier 1 of ChannelSelectedMsg (cache fresh, no GetHistory) uses this
@@ -1778,7 +1782,13 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if !isThreadReply || msg.Message.Subtype == "thread_broadcast" {
 				debuglog.Cache("NewMessageMsg: channel=%s ts=%s decision=mark_unread",
 					msg.ChannelID, msg.Message.TS)
-				a.sidebar.MarkUnread(msg.ChannelID)
+				// The DB write that flips has_unread=true for this
+				// channel already happened in the WS-handler path
+				// (cache.UpdateChannelReadState). Force the sidebar
+				// to re-read read state so the dot appears on the
+				// next render, and refresh the workspace rail so its
+				// HasUnread flag picks up the change too.
+				a.notifyReadStateChanged()
 			} else {
 				debuglog.Cache("NewMessageMsg: channel=%s ts=%s decision=skipped_thread_reply_inactive",
 					msg.ChannelID, msg.Message.TS)
@@ -2088,7 +2098,7 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case ChannelMarkedReadMsg:
 		debuglog.Cache("ChannelMarkedReadMsg: channel=%s active=%s (optimistic clear)",
 			msg.ChannelID, a.activeChannelID)
-		a.sidebar.ClearUnread(msg.ChannelID)
+		a.notifyReadStateChanged()
 
 	case DMNameResolvedMsg:
 		items := a.sidebar.Items()
@@ -2204,8 +2214,12 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			cmds = append(cmds, func() tea.Msg { return fetcher(team) })
 		}
 
-	case WorkspaceUnreadMsg:
-		a.workspaceRail.SetUnread(msg.TeamID, true)
+	case ReadStateChangedMsg:
+		// Persistent read state changed in the cache. Invalidate the
+		// sidebar and refresh the workspace rail so both re-read
+		// from the DB.
+		a.notifyReadStateChanged()
+		return a, nil
 
 	case ConversationOpenedMsg:
 		if msg.TeamID == a.activeTeamID {
@@ -4107,6 +4121,7 @@ func (a *App) SetInitialLastReadTS(ts string) {
 // Setters for external use (wiring services)
 func (a *App) SetWorkspaces(items []workspace.WorkspaceItem) {
 	a.workspaceRail.SetItems(items)
+	a.workspaceRail.RefreshUnreads()
 	a.workspaceItems = items
 	// Update workspace finder items
 	var finderItems []workspacefinder.Item
@@ -4199,9 +4214,9 @@ func (a *App) SetMessageDeleter(fn MessageDeleteFunc) {
 
 // SetMessageMarkUnreader wires the conversations.mark / subscriptions.thread.mark
 // callback used by the U key. Implementations should perform the HTTP call
-// best-effort, persist the new last_read_ts to SQLite for channel-level
-// marks (no-op for thread-level until per-thread state lands), update the
-// in-memory LastReadMap, and return MessageMarkedUnreadMsg.
+// best-effort, persist the new last_read_ts to SQLite via
+// cache.UpdateChannelReadState for channel-level marks (no-op for
+// thread-level until per-thread state lands), and return MessageMarkedUnreadMsg.
 func (a *App) SetMessageMarkUnreader(fn MarkUnreadFunc) {
 	a.messageMarkUnreader = fn
 }
@@ -4255,6 +4270,20 @@ func (a *App) SetThreadMarker(fn ThreadMarkFunc) {
 // the unread boundary sits when they open a thread. Optional.
 func (a *App) SetChannelLastReadFetcher(fn func(channelID string) string) {
 	a.channelLastReadFetcher = fn
+}
+
+// SetReadStateReader installs a callback the sidebar (and any future
+// readers) will call at render time to fetch per-channel read state.
+// Must be set before the first render for unread dots to appear.
+func (a *App) SetReadStateReader(f func() map[string]cache.ReadState) {
+	a.sidebar.SetReadStateReader(f)
+}
+
+// SetWorkspaceUnreadReader installs the callback the workspace rail
+// uses on RefreshUnreads to learn which workspaces have at least one
+// channel with has_unread=true.
+func (a *App) SetWorkspaceUnreadReader(f func() []string) {
+	a.workspaceRail.SetUnreadReader(f)
 }
 
 // SetChannelVisitRecorder wires the callback that persists a channel
@@ -5532,6 +5561,16 @@ func (a *App) beginEditOfSelected() tea.Cmd {
 	return a.compose.Focus()
 }
 
+// notifyReadStateChanged invalidates the sidebar render cache and
+// refreshes the workspace rail's HasUnread flags. Call this whenever
+// per-channel read state is mutated via the DB API (i.e., wherever
+// a.sidebar.Invalidate() used to suffice). Pairing them prevents the
+// rail from going stale when the sidebar updates.
+func (a *App) notifyReadStateChanged() {
+	a.sidebar.Invalidate()
+	a.workspaceRail.RefreshUnreads()
+}
+
 // applyChannelMark updates local state for a channel-level read-state
 // change (used by both the local mark-unread press and the inbound
 // channel_marked WS event). channelID is the channel; ts is the new
@@ -5546,7 +5585,7 @@ func (a *App) applyChannelMark(channelID, ts string, unreadCount int) {
 	if channelID == a.activeChannelID {
 		a.messagepane.SetLastReadTS(ts)
 	}
-	a.sidebar.SetUnreadCount(channelID, unreadCount)
+	a.notifyReadStateChanged()
 }
 
 // applyThreadMark updates local state for a thread-level read-state

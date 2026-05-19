@@ -10,19 +10,25 @@ import (
 // IsStale reports whether a channel should be auto-hidden from the
 // sidebar because it has been inactive longer than threshold.
 //
-// "Inactive" means: now - parseSlackTS(item.LastReadTS) > threshold.
+// hasUnread and lastReadTS are read state for the item, supplied by
+// the caller (the sidebar Model passes them through from its
+// readStateReader callback). Keeping these as parameters rather than
+// fields on ChannelItem lets the staleness predicate remain pure and
+// trivially testable without touching the DB.
+//
+// "Inactive" means: now - parseSlackTS(lastReadTS) > threshold.
 //
 // A channel is NEVER stale (returns false) when:
 //   - threshold <= 0 (feature disabled)
-//   - item.UnreadCount > 0 (active conversation)
+//   - hasUnread (active conversation)
 //   - item.Section != "" (matches a user-curated [sections.*] glob)
-//   - LastReadTS is malformed or in the future (defensive defaults)
+//   - lastReadTS is malformed or in the future (defensive defaults)
 //
-// Empty LastReadTS is type-aware:
+// Empty lastReadTS is type-aware:
 //   - For "dm" and "group_dm", empty IS stale. Slack's client.counts
 //     endpoint only returns these types when the conversation is
 //     currently "open"; absence in counts (which surfaces here as
-//     empty LastReadTS) is Slack's canonical "this conversation is
+//     empty lastReadTS) is Slack's canonical "this conversation is
 //     closed" signal. Roughly half of the user's DMs and 98% of
 //     mpdms in real workspaces fall into this bucket.
 //   - For "channel" and "private", empty is unexpected (the API
@@ -33,22 +39,22 @@ import (
 // channel") are NOT handled here. The sidebar Model layer applies
 // that on top of this predicate so this function stays pure and
 // trivially testable.
-func IsStale(item ChannelItem, threshold time.Duration, now time.Time) bool {
+func IsStale(item ChannelItem, hasUnread bool, lastReadTS string, threshold time.Duration, now time.Time) bool {
 	if threshold <= 0 {
 		return false
 	}
-	if item.UnreadCount > 0 {
+	if hasUnread {
 		return false
 	}
 	if item.Section != "" {
 		return false
 	}
-	if item.LastReadTS == "" {
+	if lastReadTS == "" {
 		// dm/group_dm without a last_read = closed conversation.
 		// Other types: defensive, prefer to show.
 		return item.Type == "dm" || item.Type == "group_dm"
 	}
-	lastRead, ok := parseSlackTS(item.LastReadTS)
+	lastRead, ok := parseSlackTS(lastReadTS)
 	if !ok {
 		return false
 	}

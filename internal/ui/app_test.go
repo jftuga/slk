@@ -2484,6 +2484,13 @@ func TestMessageMarkedUnreadMsg_ChannelLevel_UpdatesPaneSidebarAndToasts(t *test
 		{TS: "3.0", UserID: "U1", Text: "third"},
 	})
 
+	// After the read-state sync rewrite, the sidebar's unread indicator
+	// is driven by the DB (via readStateReader), not by a per-item
+	// UnreadCount that the App layer mutates. The contract is now
+	// "the sidebar was invalidated so the next render re-reads state";
+	// capture the version pre/post to verify that.
+	verBefore := app.sidebar.Version()
+
 	_, cmd := app.Update(MessageMarkedUnreadMsg{
 		ChannelID:   "C1",
 		ThreadTS:    "",
@@ -2505,11 +2512,9 @@ func TestMessageMarkedUnreadMsg_ChannelLevel_UpdatesPaneSidebarAndToasts(t *test
 		t.Errorf("expected messagepane lastReadTS=1.0, got %q", got)
 	}
 
-	// Sidebar count was set.
-	for _, it := range app.sidebar.Items() {
-		if it.ID == "C1" && it.UnreadCount != 2 {
-			t.Errorf("expected sidebar UnreadCount=2, got %d", it.UnreadCount)
-		}
+	// Sidebar was invalidated so the next View() will re-read the DB.
+	if app.sidebar.Version() == verBefore {
+		t.Errorf("expected sidebar.Version() to bump after channel mark, stayed at %d", verBefore)
 	}
 }
 
@@ -2627,6 +2632,10 @@ func TestChannelMarkedRemoteMsg_UpdatesPaneAndSidebarSilently(t *testing.T) {
 		{TS: "2.0", UserID: "U1", Text: "second"},
 	})
 
+	// Sidebar invalidation contract (read-state sync rewrite): App
+	// flips sidebar.version; the next View() re-reads the DB.
+	verBefore := app.sidebar.Version()
+
 	_, cmd := app.Update(ChannelMarkedRemoteMsg{
 		ChannelID:   "C1",
 		TS:          "1.0",
@@ -2641,10 +2650,8 @@ func TestChannelMarkedRemoteMsg_UpdatesPaneAndSidebarSilently(t *testing.T) {
 	if got := app.messagepane.LastReadTS(); got != "1.0" {
 		t.Errorf("messagepane lastReadTS: got %q", got)
 	}
-	for _, it := range app.sidebar.Items() {
-		if it.ID == "C1" && it.UnreadCount != 1 {
-			t.Errorf("sidebar UnreadCount: got %d", it.UnreadCount)
-		}
+	if app.sidebar.Version() == verBefore {
+		t.Errorf("expected sidebar.Version() to bump after remote channel mark, stayed at %d", verBefore)
 	}
 }
 
@@ -2656,6 +2663,7 @@ func TestChannelMarkedRemoteMsg_InactiveChannel_OnlyUpdatesSidebar(t *testing.T)
 		{ID: "C_OTHER", Name: "elsewhere", Section: "Channels"},
 	})
 	prevLastRead := app.messagepane.LastReadTS()
+	verBefore := app.sidebar.Version()
 
 	_, _ = app.Update(ChannelMarkedRemoteMsg{
 		ChannelID: "C1", TS: "1.0", UnreadCount: 3,
@@ -2665,11 +2673,10 @@ func TestChannelMarkedRemoteMsg_InactiveChannel_OnlyUpdatesSidebar(t *testing.T)
 	if app.messagepane.LastReadTS() != prevLastRead {
 		t.Error("messagepane should be untouched when remote event is for non-active channel")
 	}
-	// Sidebar still updated.
-	for _, it := range app.sidebar.Items() {
-		if it.ID == "C1" && it.UnreadCount != 3 {
-			t.Errorf("expected C1 sidebar UnreadCount=3, got %d", it.UnreadCount)
-		}
+	// Sidebar still receives the invalidate signal so the next render
+	// reflects the new DB state for C1.
+	if app.sidebar.Version() == verBefore {
+		t.Errorf("expected sidebar.Version() to bump after remote channel mark, stayed at %d", verBefore)
 	}
 }
 
@@ -2729,24 +2736,33 @@ func TestConversationOpenedMsg_SidebarReceivesItemAndUnread(t *testing.T) {
 		},
 	})
 
+	// Capture sidebar version so we can verify the inbound NewMessageMsg
+	// invalidates the render cache. After the read-state sync rewrite,
+	// the App layer no longer mutates a per-channel UnreadCount on the
+	// sidebar — the DB write happens in the WS handler (OnMessage), and
+	// App.Update merely invalidates the sidebar so the next render
+	// re-reads has_unread from the DB.
+	verBefore := app.sidebar.Version()
+
 	// Then a message arrives for that mpdm while the user is elsewhere.
 	app.Update(NewMessageMsg{
 		ChannelID: "G1",
 		Message:   messages.MessageItem{TS: "1700000001.000000", UserID: "U2", Text: "hi"},
 	})
 
-	// The sidebar should now show G1 with UnreadCount > 0.
+	// G1 must be present in the sidebar (from the ConversationOpenedMsg)
+	// and the sidebar must have been invalidated by NewMessageMsg.
 	found := false
 	for _, it := range app.sidebar.AllItems() {
 		if it.ID == "G1" {
 			found = true
-			if it.UnreadCount < 1 {
-				t.Errorf("G1 UnreadCount = %d, want >= 1", it.UnreadCount)
-			}
 		}
 	}
 	if !found {
 		t.Errorf("G1 not in sidebar after ConversationOpenedMsg")
+	}
+	if app.sidebar.Version() == verBefore {
+		t.Errorf("expected sidebar.Version() to bump after inactive-channel NewMessageMsg, stayed at %d", verBefore)
 	}
 }
 

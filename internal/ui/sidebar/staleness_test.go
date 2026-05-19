@@ -3,6 +3,8 @@ package sidebar
 import (
 	"testing"
 	"time"
+
+	"github.com/gammons/slk/internal/cache"
 )
 
 func TestIsStale(t *testing.T) {
@@ -15,102 +17,120 @@ func TestIsStale(t *testing.T) {
 	}
 
 	cases := []struct {
-		name      string
-		item      ChannelItem
-		threshold time.Duration
-		want      bool
+		name       string
+		item       ChannelItem
+		hasUnread  bool
+		lastReadTS string
+		threshold  time.Duration
+		want       bool
 	}{
 		{
-			name:      "fresh: read 1 day ago",
-			item:      ChannelItem{ID: "C1", LastReadTS: tsAt(now.Add(-24 * time.Hour))},
-			threshold: threshold,
-			want:      false,
+			name:       "fresh: read 1 day ago",
+			item:       ChannelItem{ID: "C1"},
+			lastReadTS: tsAt(now.Add(-24 * time.Hour)),
+			threshold:  threshold,
+			want:       false,
 		},
 		{
-			name:      "stale: read 60 days ago",
-			item:      ChannelItem{ID: "C1", LastReadTS: tsAt(now.Add(-60 * 24 * time.Hour))},
-			threshold: threshold,
-			want:      true,
+			name:       "stale: read 60 days ago",
+			item:       ChannelItem{ID: "C1"},
+			lastReadTS: tsAt(now.Add(-60 * 24 * time.Hour)),
+			threshold:  threshold,
+			want:       true,
 		},
 		{
-			name:      "edge: read exactly 30 days ago is NOT stale",
-			item:      ChannelItem{ID: "C1", LastReadTS: tsAt(now.Add(-30 * 24 * time.Hour))},
-			threshold: threshold,
-			want:      false,
+			name:       "edge: read exactly 30 days ago is NOT stale",
+			item:       ChannelItem{ID: "C1"},
+			lastReadTS: tsAt(now.Add(-30 * 24 * time.Hour)),
+			threshold:  threshold,
+			want:       false,
 		},
 		{
-			name:      "edge: read 30 days + 1 minute ago IS stale",
-			item:      ChannelItem{ID: "C1", LastReadTS: tsAt(now.Add(-30*24*time.Hour - time.Minute))},
-			threshold: threshold,
-			want:      true,
+			name:       "edge: read 30 days + 1 minute ago IS stale",
+			item:       ChannelItem{ID: "C1"},
+			lastReadTS: tsAt(now.Add(-30*24*time.Hour - time.Minute)),
+			threshold:  threshold,
+			want:       true,
 		},
 		{
-			name:      "exception: unread > 0 is never stale",
-			item:      ChannelItem{ID: "C1", LastReadTS: tsAt(now.Add(-90 * 24 * time.Hour)), UnreadCount: 1},
-			threshold: threshold,
-			want:      false,
+			name:       "exception: unread > 0 is never stale",
+			item:       ChannelItem{ID: "C1"},
+			lastReadTS: tsAt(now.Add(-90 * 24 * time.Hour)),
+			hasUnread:  true,
+			threshold:  threshold,
+			want:       false,
 		},
 		{
-			name:      "exception: custom-section channel is never stale",
-			item:      ChannelItem{ID: "C1", LastReadTS: tsAt(now.Add(-90 * 24 * time.Hour)), Section: "Engineering"},
-			threshold: threshold,
-			want:      false,
+			name:       "exception: custom-section channel is never stale",
+			item:       ChannelItem{ID: "C1", Section: "Engineering"},
+			lastReadTS: tsAt(now.Add(-90 * 24 * time.Hour)),
+			threshold:  threshold,
+			want:       false,
 		},
 		{
 			// Public/private channels always include a last_read in
 			// client.counts, so an empty value here likely means
 			// "brand-new join, counts hasn't refreshed yet" -- show
 			// rather than hide.
-			name:      "empty LastReadTS on public channel is NOT stale",
-			item:      ChannelItem{ID: "C1", Type: "channel", LastReadTS: ""},
-			threshold: threshold,
-			want:      false,
+			name:       "empty LastReadTS on public channel is NOT stale",
+			item:       ChannelItem{ID: "C1", Type: "channel"},
+			lastReadTS: "",
+			threshold:  threshold,
+			want:       false,
 		},
 		{
-			name:      "empty LastReadTS on private channel is NOT stale",
-			item:      ChannelItem{ID: "C1", Type: "private", LastReadTS: ""},
-			threshold: threshold,
-			want:      false,
+			name:       "empty LastReadTS on private channel is NOT stale",
+			item:       ChannelItem{ID: "C1", Type: "private"},
+			lastReadTS: "",
+			threshold:  threshold,
+			want:       false,
 		},
 		{
 			// Slack's client.counts only returns dm/group_dm entries
 			// for currently-open conversations. Absence (empty
-			// LastReadTS) is the canonical "this conversation is
+			// lastReadTS) is the canonical "this conversation is
 			// closed/stale" signal for these types.
-			name:      "empty LastReadTS on dm IS stale",
-			item:      ChannelItem{ID: "DM1", Type: "dm", LastReadTS: ""},
-			threshold: threshold,
-			want:      true,
+			name:       "empty LastReadTS on dm IS stale",
+			item:       ChannelItem{ID: "DM1", Type: "dm"},
+			lastReadTS: "",
+			threshold:  threshold,
+			want:       true,
 		},
 		{
-			name:      "empty LastReadTS on group_dm IS stale",
-			item:      ChannelItem{ID: "MPDM1", Type: "group_dm", LastReadTS: ""},
-			threshold: threshold,
-			want:      true,
+			name:       "empty LastReadTS on group_dm IS stale",
+			item:       ChannelItem{ID: "MPDM1", Type: "group_dm"},
+			lastReadTS: "",
+			threshold:  threshold,
+			want:       true,
 		},
 		{
-			name:      "empty LastReadTS on stale dm respects unread exception",
-			item:      ChannelItem{ID: "DM1", Type: "dm", LastReadTS: "", UnreadCount: 1},
-			threshold: threshold,
-			want:      false,
+			name:       "empty LastReadTS on stale dm respects unread exception",
+			item:       ChannelItem{ID: "DM1", Type: "dm"},
+			lastReadTS: "",
+			hasUnread:  true,
+			threshold:  threshold,
+			want:       false,
 		},
 		{
-			name:      "empty LastReadTS respects threshold=0 disable",
-			item:      ChannelItem{ID: "MPDM1", Type: "group_dm", LastReadTS: ""},
-			threshold: 0,
-			want:      false,
+			name:       "empty LastReadTS respects threshold=0 disable",
+			item:       ChannelItem{ID: "MPDM1", Type: "group_dm"},
+			lastReadTS: "",
+			threshold:  0,
+			want:       false,
 		},
 		{
-			name:      "malformed LastReadTS is treated as not stale",
-			item:      ChannelItem{ID: "C1", LastReadTS: "not-a-timestamp"},
-			threshold: threshold,
-			want:      false,
+			name:       "malformed LastReadTS is treated as not stale",
+			item:       ChannelItem{ID: "C1"},
+			lastReadTS: "not-a-timestamp",
+			threshold:  threshold,
+			want:       false,
 		},
 		{
-			name:      "future LastReadTS is treated as not stale",
-			item:      ChannelItem{ID: "C1", LastReadTS: tsAt(now.Add(24 * time.Hour))},
-			threshold: threshold,
-			want:      false,
+			name:       "future LastReadTS is treated as not stale",
+			item:       ChannelItem{ID: "C1"},
+			lastReadTS: tsAt(now.Add(24 * time.Hour)),
+			threshold:  threshold,
+			want:       false,
 		},
 		{
 			// Slack uses "0000000000.000000" as the LastRead value for
@@ -118,36 +138,41 @@ func TestIsStale(t *testing.T) {
 			// treated as the most-stale of all (never opened) and
 			// auto-hidden. Regression: previously parseSlackTS
 			// rejected sec<=0, so these stayed visible forever.
-			name:      "Slack 'never read' sentinel '0000000000.000000' is stale",
-			item:      ChannelItem{ID: "MPDM1", LastReadTS: "0000000000.000000"},
-			threshold: threshold,
-			want:      true,
+			name:       "Slack 'never read' sentinel '0000000000.000000' is stale",
+			item:       ChannelItem{ID: "MPDM1"},
+			lastReadTS: "0000000000.000000",
+			threshold:  threshold,
+			want:       true,
 		},
 		{
-			name:      "Slack 'never read' bare zero '0' is stale",
-			item:      ChannelItem{ID: "MPDM2", LastReadTS: "0"},
-			threshold: threshold,
-			want:      true,
+			name:       "Slack 'never read' bare zero '0' is stale",
+			item:       ChannelItem{ID: "MPDM2"},
+			lastReadTS: "0",
+			threshold:  threshold,
+			want:       true,
 		},
 		{
-			name:      "threshold 0 disables staleness entirely",
-			item:      ChannelItem{ID: "C1", LastReadTS: tsAt(now.Add(-365 * 24 * time.Hour))},
-			threshold: 0,
-			want:      false,
+			name:       "threshold 0 disables staleness entirely",
+			item:       ChannelItem{ID: "C1"},
+			lastReadTS: tsAt(now.Add(-365 * 24 * time.Hour)),
+			threshold:  0,
+			want:       false,
 		},
 		{
-			name:      "negative threshold disables staleness",
-			item:      ChannelItem{ID: "C1", LastReadTS: tsAt(now.Add(-365 * 24 * time.Hour))},
-			threshold: -time.Hour,
-			want:      false,
+			name:       "negative threshold disables staleness",
+			item:       ChannelItem{ID: "C1"},
+			lastReadTS: tsAt(now.Add(-365 * 24 * time.Hour)),
+			threshold:  -time.Hour,
+			want:       false,
 		},
 	}
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			got := IsStale(tc.item, tc.threshold, now)
+			got := IsStale(tc.item, tc.hasUnread, tc.lastReadTS, tc.threshold, now)
 			if got != tc.want {
-				t.Errorf("IsStale(%+v, %v) = %v, want %v", tc.item, tc.threshold, got, tc.want)
+				t.Errorf("IsStale(%+v, hasUnread=%v, lastReadTS=%q, %v) = %v, want %v",
+					tc.item, tc.hasUnread, tc.lastReadTS, tc.threshold, got, tc.want)
 			}
 		})
 	}
@@ -172,14 +197,26 @@ func TestSidebar_HidesStaleChannels(t *testing.T) {
 	fresh := tsAt(now.Add(-1 * 24 * time.Hour))
 
 	items := []ChannelItem{
-		{ID: "C-fresh", Name: "general", Type: "channel", LastReadTS: fresh},
-		{ID: "C-stale", Name: "old-project", Type: "channel", LastReadTS: stale},
-		{ID: "C-stale-unread", Name: "old-but-pinged", Type: "channel", LastReadTS: stale, UnreadCount: 1},
-		{ID: "C-stale-section", Name: "alerts-old", Type: "channel", LastReadTS: stale, Section: "Alerts"},
-		{ID: "DM-stale-active", Name: "alice", Type: "dm", LastReadTS: stale},
+		{ID: "C-fresh", Name: "general", Type: "channel"},
+		{ID: "C-stale", Name: "old-project", Type: "channel"},
+		{ID: "C-stale-unread", Name: "old-but-pinged", Type: "channel"},
+		{ID: "C-stale-section", Name: "alerts-old", Type: "channel", Section: "Alerts"},
+		{ID: "DM-stale-active", Name: "alice", Type: "dm"},
+	}
+
+	// Per-channel read state, mirroring what the live readStateReader
+	// (DB-backed) would return. C-stale-unread carries a HasUnread=true
+	// signal to exercise the unread-exception branch of IsStale.
+	readState := map[string]cache.ReadState{
+		"C-fresh":         {LastReadTS: fresh},
+		"C-stale":         {LastReadTS: stale},
+		"C-stale-unread":  {LastReadTS: stale, HasUnread: true},
+		"C-stale-section": {LastReadTS: stale},
+		"DM-stale-active": {LastReadTS: stale},
 	}
 
 	m := New(items)
+	m.SetReadStateReader(func() map[string]cache.ReadState { return readState })
 	m.SetNowFunc(func() time.Time { return now })
 	m.SetStaleThreshold(30 * 24 * time.Hour)
 	m.SetActiveChannelID("DM-stale-active")

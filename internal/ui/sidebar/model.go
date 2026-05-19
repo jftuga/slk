@@ -7,7 +7,7 @@ import (
 	"time"
 
 	"charm.land/lipgloss/v2"
-	"github.com/gammons/slk/internal/debuglog"
+	"github.com/gammons/slk/internal/cache"
 	"github.com/gammons/slk/internal/ui/messages"
 	"github.com/gammons/slk/internal/ui/styles"
 	kyoemoji "github.com/kyokomi/emoji/v2"
@@ -26,19 +26,14 @@ const (
 )
 
 type ChannelItem struct {
-	ID            string
-	Name          string
-	Type          string // channel, dm, group_dm, private, app
-	Section       string // section name for grouping (e.g. "Engineering", "Starred")
-	SectionOrder  int    // sort order from config; lower = higher in sidebar (custom sections only)
-	UnreadCount   int
-	IsStarred     bool
-	Presence      string // for DMs: active, away, dnd
-	DMUserID      string // for DMs: the user ID of the other party
-	// LastReadTS is the Slack-format timestamp of the user's last
-	// read marker for this channel ("1700000001.000000"). Used by
-	// the staleness filter; empty means "never read" or "no signal".
-	LastReadTS string
+	ID           string
+	Name         string
+	Type         string // channel, dm, group_dm, private, app
+	Section      string // section name for grouping (e.g. "Engineering", "Starred")
+	SectionOrder int    // sort order from config; lower = higher in sidebar (custom sections only)
+	IsStarred    bool
+	Presence     string // for DMs: active, away, dnd
+	DMUserID     string // for DMs: the user ID of the other party
 	// IsMuted reports whether the user has muted this channel (via
 	// Slack's muted_channels user pref). Muted channels render with a
 	// dimmer foreground and suppress their unread dot; they also do
@@ -196,12 +191,18 @@ type Model struct {
 	// orderedSections function returns the provider's verbatim order
 	// and headers are keyed by section ID instead of name.
 	sectionsProvider SectionsProvider
+	// readStateReader returns the per-channel read state map for the
+	// active workspace, keyed by channel ID. Set by App via
+	// SetReadStateReader. May be nil — nil means "treat everything as
+	// no-unread" (used during early construction).
+	readStateReader func() map[string]cache.ReadState
 	// collapseByID parallels `collapsed` for Slack-mode (ID-keyed).
 	// Renames preserve collapse state because the ID is stable.
 	// Populated lazily; lookups treat nil as empty. Used in Task 9.
 	collapseByID map[string]bool
 
-	// Staleness filter: items whose LastReadTS is older than
+	// Staleness filter: items whose last_read_ts (from the read-state
+	// DB, fetched via readStateReader in rebuildFilter) is older than
 	// staleThreshold are dropped from `filtered` (i.e. hidden from the
 	// rendered sidebar). 0 disables the feature. activeID names the
 	// channel currently displayed in the message pane and is always
@@ -261,6 +262,23 @@ func (m *Model) SetSectionsProvider(p SectionsProvider) {
 	m.sectionsProvider = p
 	m.rebuildFilter()
 	m.rebuildNavPreserveCursor()
+	m.cacheValid = false
+	m.dirty()
+}
+
+// SetReadStateReader installs a callback that returns the per-channel
+// read state map for the workspace currently presented by this sidebar.
+// Called by View() at render time. Setting it invalidates the row cache
+// so the next render reflects the new source.
+func (m *Model) SetReadStateReader(f func() map[string]cache.ReadState) {
+	m.readStateReader = f
+	m.cacheValid = false
+	m.dirty()
+}
+
+// Invalidate forces the next View() call to re-read read state from
+// the installed reader. Called by App.Update on ReadStateChangedMsg.
+func (m *Model) Invalidate() {
 	m.cacheValid = false
 	m.dirty()
 }
@@ -565,11 +583,11 @@ func (m *Model) SetItems(items []ChannelItem) {
 }
 
 // UpsertItem inserts a new ChannelItem keyed by ID, or updates an existing
-// item in place if the ID is already present. On update, all fields EXCEPT
-// UnreadCount and LastReadTS are overwritten from the supplied item; those
-// two are preserved because Slack's mpim_open / im_created / group_joined
-// payloads do not carry unread state, so clobbering would erase live
-// indicators we want to keep visible.
+// item in place if the ID is already present. On update, all descriptive
+// fields are overwritten from the supplied item. Read state (HasUnread,
+// LastReadTS) is no longer mirrored on ChannelItem -- it lives exclusively
+// in the read-state DB and is read at render time via the readStateReader
+// callback, so there's nothing to preserve here.
 //
 // Re-runs the staleness filter so a freshly-added item (or one whose
 // staleness state may have changed) is reflected in the visible list
@@ -577,12 +595,7 @@ func (m *Model) SetItems(items []ChannelItem) {
 func (m *Model) UpsertItem(item ChannelItem) {
 	for i := range m.items {
 		if m.items[i].ID == item.ID {
-			// Preserve unread/last-read; overwrite descriptive fields.
-			preservedUnread := m.items[i].UnreadCount
-			preservedLastRead := m.items[i].LastReadTS
 			m.items[i] = item
-			m.items[i].UnreadCount = preservedUnread
-			m.items[i].LastReadTS = preservedLastRead
 			m.rebuildFilter()
 			m.rebuildNavPreserveCursor()
 			m.cacheValid = false
@@ -711,72 +724,6 @@ func (m *Model) VisibleItems() []ChannelItem {
 	return result
 }
 
-// MarkUnread increments the unread count for the given channel by 1.
-// No-op if the channel is not in the sidebar's items. Re-runs the filter
-// so a previously stale-hidden channel becomes visible again as soon as
-// its UnreadCount becomes non-zero (the staleness filter exempts items
-// with UnreadCount > 0).
-func (m *Model) MarkUnread(channelID string) {
-	for i := range m.items {
-		if m.items[i].ID == channelID {
-			before := m.items[i].UnreadCount
-			m.items[i].UnreadCount++
-			debuglog.Cache("sidebar.MarkUnread: channel=%s name=%q before=%d after=%d muted=%v",
-				channelID, m.items[i].Name, before, m.items[i].UnreadCount, m.items[i].IsMuted)
-			m.rebuildFilter()
-			m.rebuildNavPreserveCursor()
-			m.cacheValid = false
-			m.dirty()
-			return
-		}
-	}
-}
-
-// ClearUnread sets the unread count to 0 for the given channel.
-func (m *Model) ClearUnread(channelID string) {
-	for i := range m.items {
-		if m.items[i].ID == channelID {
-			before := m.items[i].UnreadCount
-			debuglog.Cache("sidebar.ClearUnread: channel=%s name=%q before=%d after=0 muted=%v",
-				channelID, m.items[i].Name, before, m.items[i].IsMuted)
-			if m.items[i].UnreadCount != 0 {
-				m.items[i].UnreadCount = 0
-				m.cacheValid = false
-				m.dirty()
-			}
-			return
-		}
-	}
-}
-
-// SetUnreadCount sets the unread count for the given channel to an exact
-// value (use n=0 to clear). Re-runs the staleness filter so a channel that
-// becomes unread reappears in the sidebar (the staleness rule exempts items
-// with UnreadCount > 0). No-op if the channel is not in the sidebar.
-//
-// Differs from MarkUnread (which only increments by 1) and ClearUnread
-// (which only sets to 0): this setter is used by mark-unread and by the
-// channel_marked WS event reconciliation, both of which know the desired
-// final count.
-func (m *Model) SetUnreadCount(channelID string, n int) {
-	for i := range m.items {
-		if m.items[i].ID == channelID {
-			before := m.items[i].UnreadCount
-			debuglog.Cache("sidebar.SetUnreadCount: channel=%s name=%q before=%d after=%d muted=%v",
-				channelID, m.items[i].Name, before, n, m.items[i].IsMuted)
-			if m.items[i].UnreadCount == n {
-				return
-			}
-			m.items[i].UnreadCount = n
-			m.rebuildFilter()
-			m.rebuildNavPreserveCursor()
-			m.cacheValid = false
-			m.dirty()
-			return
-		}
-	}
-}
-
 // UpdatePresenceByUser updates the presence for any DM item whose DMUserID matches.
 func (m *Model) UpdatePresenceByUser(userID, presence string) {
 	for i := range m.items {
@@ -837,6 +784,15 @@ func (m *Model) rebuildFilter() {
 	m.filtered = nil
 	lower := strings.ToLower(m.filter)
 	now := m.now()
+	// Fetch read state once for the whole filter pass so IsStale can
+	// see the same hasUnread/lastReadTS the rest of the sidebar does.
+	// nil-safe: when no reader is installed (early construction, some
+	// tests) every lookup returns the zero value and IsStale's
+	// type-aware empty-LastReadTS branch handles it.
+	var readState map[string]cache.ReadState
+	if m.readStateReader != nil {
+		readState = m.readStateReader()
+	}
 	for i, item := range m.items {
 		if m.filter != "" && !strings.Contains(strings.ToLower(item.Name), lower) {
 			continue
@@ -844,7 +800,8 @@ func (m *Model) rebuildFilter() {
 		// Staleness filter: drop items the user hasn't read in a long
 		// time, with the active channel always exempt so it can't
 		// disappear out from under them.
-		if item.ID != m.activeID && IsStale(item, m.staleThreshold, now) {
+		state := readState[item.ID]
+		if item.ID != m.activeID && IsStale(item, state.HasUnread, state.LastReadTS, m.staleThreshold, now) {
 			continue
 		}
 		m.filtered = append(m.filtered, i)
@@ -958,13 +915,22 @@ func (m *Model) rebuildNavPreserveCursor() {
 	m.cursor = 0
 }
 
-// aggregateUnreadForSection returns the sum of UnreadCount across every
-// item in the named section that is currently in m.filtered. Used to
-// render an aggregate badge on collapsed section headers. Muted
-// channels are excluded so the aggregate matches the per-row treatment
-// (no dot, dim foreground) — the user has explicitly asked Slack to
-// ignore those channels' unread activity.
+// aggregateUnreadForSection returns the count of channels-with-unreads
+// in the named section that are currently in m.filtered. Used to render
+// an aggregate badge on collapsed section headers. Muted channels are
+// excluded so the aggregate matches the per-row treatment (no dot, dim
+// foreground) — the user has explicitly asked Slack to ignore those
+// channels' unread activity.
+//
+// After the read-state sync rewrite, integer unread counts are
+// abandoned in favor of a boolean has_unread per channel; section
+// aggregates count channels-with-unreads instead of summing per-channel
+// counts. The DB (read via readStateReader) is the source of truth.
 func (m *Model) aggregateUnreadForSection(section string) int {
+	var readState map[string]cache.ReadState
+	if m.readStateReader != nil {
+		readState = m.readStateReader()
+	}
 	total := 0
 	for _, idx := range m.filtered {
 		item := m.items[idx]
@@ -974,7 +940,9 @@ func (m *Model) aggregateUnreadForSection(section string) int {
 		if m.sectionFor(item) != section {
 			continue
 		}
-		total += item.UnreadCount
+		if readState[item.ID].HasUnread {
+			total++
+		}
 	}
 	return total
 }
@@ -1016,6 +984,16 @@ func (m *Model) buildCache(width int) {
 	m.cacheWidth = width
 	m.cacheRows = m.cacheRows[:0]
 	m.cacheFiller = lipgloss.NewStyle().Width(width).Background(styles.SidebarBackground).Render("")
+
+	// Per-channel read state for the active workspace. The DB is the
+	// source of truth for unread indicators; ChannelItem.UnreadCount
+	// is no longer consulted by rendering. A nil reader (early
+	// construction, tests without wiring) means "treat everything as
+	// no-unread" — lookups on a nil map return the zero ReadState.
+	var readState map[string]cache.ReadState
+	if m.readStateReader != nil {
+		readState = m.readStateReader()
+	}
 
 	// Reverse-index nav by section name and by filter idx so we can map
 	// each rendered row back to its nav index. Headers are uniquely
@@ -1143,13 +1121,18 @@ func (m *Model) buildCache(width int) {
 			continue
 		}
 
+		// hasUnread is the rendering-facing boolean: "should this row
+		// pop visually?" It's a function of the DB's has_unread for
+		// this channel AND the user's mute pref. Muted channels never
+		// pop, even when they have new messages — Slack's contract is
+		// "muted = no notification surface". The dimmer ChannelMuted
+		// style below distinguishes muted-with-unreads from a fully
+		// read row visually.
+		hasUnread := readState[item.ID].HasUnread && !item.IsMuted
+
 		// Unread dot indicator (same regardless of selection state).
-		// Muted channels never get the dot — Slack's contract is "muted
-		// = no notification surface", so even unread activity should not
-		// pull the eye. The dimmer ChannelMuted style below distinguishes
-		// muted-with-unreads from a fully read row.
 		unreadDot := " "
-		if item.UnreadCount > 0 && !item.IsMuted {
+		if hasUnread {
 			unreadDot = unreadDotStr
 		}
 
@@ -1166,13 +1149,13 @@ func (m *Model) buildCache(width int) {
 		case "private":
 			// Muted channels use the plain glyph regardless of unread
 			// state so the row reads as quiet across all of its parts.
-			if item.UnreadCount > 0 && !item.IsMuted {
+			if hasUnread {
 				prefix = privatePrefix
 			} else {
 				prefix = privatePrefixMuted
 			}
 		case "app":
-			if item.UnreadCount > 0 && !item.IsMuted {
+			if hasUnread {
 				prefix = appPrefix
 			} else {
 				prefix = appPrefixMuted
@@ -1227,11 +1210,11 @@ func (m *Model) buildCache(width int) {
 		// renders visibly brighter than read public channels which
 		// have no inline ANSI in their prefix at all.
 		boldAttr := ""
-		if item.UnreadCount > 0 && !item.IsMuted {
+		if hasUnread {
 			boldAttr = "\x1b[1m"
 		}
 		normalFg := messages.SidebarMutedFgANSI()
-		if item.UnreadCount > 0 && !item.IsMuted {
+		if hasUnread {
 			normalFg = messages.SidebarFgANSI()
 		}
 		normalAttrs := messages.SidebarBgANSI() + normalFg + boldAttr
@@ -1242,12 +1225,13 @@ func (m *Model) buildCache(width int) {
 
 		// Pick base style for non-selected state. Muted always wins
 		// over Unread/Normal so muted-with-unreads renders dim, not
-		// bright-and-bold.
+		// bright-and-bold. (hasUnread already excludes muted, but
+		// keep the explicit IsMuted arm first for clarity.)
 		var baseStyle lipgloss.Style
 		switch {
 		case item.IsMuted:
 			baseStyle = styles.ChannelMuted
-		case item.UnreadCount > 0:
+		case hasUnread:
 			baseStyle = styles.ChannelUnread
 		default:
 			baseStyle = styles.ChannelNormal
@@ -1333,7 +1317,8 @@ func (m *Model) sectionDisplayMeta(sectionKey string) (name, emoji string) {
 // renderSectionHeaderLabel returns the (normal, selected) label
 // strings for a section header. Headers show a triangle indicating
 // expand/collapse state and, when collapsed, an aggregate unread badge
-// summing UnreadCount across every visible item in the section.
+// counting channels-with-unreads across every visible item in the
+// section (sourced from the read-state DB via readStateReader).
 //
 // In Slack mode, the `name` parameter is a section ID — we look up the
 // user-visible name and (if any) emoji shortcode from the provider and

@@ -638,6 +638,18 @@ func TestBackfill_OvernightSuspendScenario(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	// D: a channel the user had unreads in pre-suspend, then read in the
+	// official Slack client during the offline window. The reconnect
+	// catch-up must reflect that — HasUnread=false and the newer LastRead.
+	// This is the regression test for Symptom 2 from the read-state-sync
+	// spec.
+	if err := db.UpsertChannel(cache.Channel{ID: "D", WorkspaceID: "T1", Name: "team-product", Type: "channel", IsMember: true}); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.UpdateChannelReadState("D", "1700000050.000000", true); err != nil {
+		t.Fatal(err)
+	}
+
 	// --- Server state at wake-up ---
 
 	fh := &fakeHistory{
@@ -661,6 +673,10 @@ func TestBackfill_OvernightSuspendScenario(t *testing.T) {
 			// C is not in unreads → must still be backfilled because
 			// it's in the cached-channels set, even though the result
 			// will be empty.
+			// D was read in the official client during the offline window: server
+			// returns HasUnread=false and the new LastRead. Catch-up must clear
+			// slk's local has_unread and advance last_read_ts.
+			{ChannelID: "D", HasUnread: false, LastRead: "1700008600.000000"},
 		},
 	}
 
@@ -723,6 +739,21 @@ func TestBackfill_OvernightSuspendScenario(t *testing.T) {
 	if got := db.GetChannelSyncedAt("C"); got == 0 {
 		t.Errorf("C: synced_at not bumped — channel was skipped by candidate set, not visited")
 	}
+
+	// --- D assertions: Symptom 2 catch-up ---
+
+	// D had has_unread=true pre-suspend; the catch-up batch write should
+	// have cleared it because client.counts returned HasUnread=false.
+	sD, err := db.GetChannelReadState("D")
+	if err != nil {
+		t.Fatalf("GetChannelReadState D: %v", err)
+	}
+	if sD.HasUnread {
+		t.Errorf("D HasUnread = true after catch-up; Symptom 2 not fixed")
+	}
+	if sD.LastReadTS != "1700008600.000000" {
+		t.Errorf("D LastReadTS = %q, want %q", sD.LastReadTS, "1700008600.000000")
+	}
 }
 
 // makeBackfillMessages returns n messages with monotonically
@@ -739,4 +770,50 @@ func makeBackfillMessages(base string, n int) []slack.Message {
 		}}
 	}
 	return out
+}
+
+func TestRunChannelPhase_WritesReadStateForAllChannels(t *testing.T) {
+	db := newTestDB(t)
+	if err := db.UpsertChannel(cache.Channel{ID: "C1", WorkspaceID: "T1", Name: "a", Type: "channel", IsMember: true}); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.UpsertChannel(cache.Channel{ID: "C2", WorkspaceID: "T1", Name: "b", Type: "channel", IsMember: true}); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.UpsertChannel(cache.Channel{ID: "C3", WorkspaceID: "T1", Name: "c", Type: "channel", IsMember: true}); err != nil {
+		t.Fatal(err)
+	}
+
+	// Pre-seed C2 as unread, mirroring "user had unreads pre-suspend".
+	if err := db.UpdateChannelReadState("C2", "1.0000", true); err != nil {
+		t.Fatal(err)
+	}
+
+	fh := &fakeHistory{
+		unreads: []slackclient.UnreadInfo{
+			{ChannelID: "C1", HasUnread: true, LastRead: "1.0010"},
+			{ChannelID: "C2", HasUnread: false, LastRead: "1.0020"}, // user read it in official client
+			{ChannelID: "C3", HasUnread: false, LastRead: "1.0030"},
+		},
+	}
+	bf := newBackfiller(fh, db, "T1", "U_ME", nil, 4, 100, nil)
+	if err := bf.run(context.Background()); err != nil {
+		t.Fatalf("backfill run: %v", err)
+	}
+
+	s1, _ := db.GetChannelReadState("C1")
+	if !s1.HasUnread || s1.LastReadTS != "1.0010" {
+		t.Errorf("C1 = %+v, want {HasUnread:true LastReadTS:1.0010}", s1)
+	}
+	s2, _ := db.GetChannelReadState("C2")
+	if s2.HasUnread {
+		t.Errorf("C2 HasUnread still true after catch-up (Symptom 2 not fixed): %+v", s2)
+	}
+	if s2.LastReadTS != "1.0020" {
+		t.Errorf("C2 LastReadTS = %q, want %q", s2.LastReadTS, "1.0020")
+	}
+	s3, _ := db.GetChannelReadState("C3")
+	if s3.HasUnread || s3.LastReadTS != "1.0030" {
+		t.Errorf("C3 = %+v, want {HasUnread:false LastReadTS:1.0030}", s3)
+	}
 }
