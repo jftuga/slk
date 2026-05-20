@@ -270,6 +270,15 @@ type (
 		TeamID   string
 		Channels []sidebar.ChannelItem
 	}
+	// ChannelMembershipMsg is published by membership.Manager when a
+	// channel's member set has been loaded, updated by a delta event, or
+	// refreshed after a TTL miss / reconnect. MemberIDs is the full member
+	// list (not a delta). May be sent for non-active channels — the App
+	// forwards to both compose pickers, which gate on activeChannelID.
+	ChannelMembershipMsg struct {
+		ChannelID string
+		MemberIDs []string
+	}
 	WorkspaceReadyMsg struct {
 		TeamID      string
 		TeamName    string
@@ -2412,6 +2421,10 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// Inactive-workspace events have already updated the
 		// WorkspaceContext.Channels in cmd/slk; App.Update only mutates
 		// the active sidebar.
+
+	case ChannelMembershipMsg:
+		a.SetChannelMembership(msg.ChannelID, msg.MemberIDs)
+		return a, nil
 
 	case SpinnerTickMsg:
 		if a.loading || a.messagepane.IsLoading() {

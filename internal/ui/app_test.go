@@ -4036,6 +4036,33 @@ func TestSetExternalUsersPropagates(t *testing.T) {
 	}
 }
 
+func TestChannelMembershipMsgUpdatesPicker(t *testing.T) {
+	app := NewApp()
+	app.activeTeamID = "T1"
+	app.activeChannelID = "C1"
+	app.compose.SetActiveChannel("C1")
+	app.threadCompose.SetActiveChannel("C1")
+	app.SetUserNames(map[string]string{"U1": "alice", "U2": "bob"})
+
+	_, _ = app.Update(ChannelMembershipMsg{ChannelID: "C1", MemberIDs: []string{"U1"}})
+
+	var aliceInCh, bobInCh bool
+	for _, u := range app.compose.MentionUsers() {
+		if u.ID == "U1" {
+			aliceInCh = u.InChannel
+		}
+		if u.ID == "U2" {
+			bobInCh = u.InChannel
+		}
+	}
+	if !aliceInCh {
+		t.Error("alice should be in-channel after ChannelMembershipMsg")
+	}
+	if bobInCh {
+		t.Error("bob should be not-in-channel after ChannelMembershipMsg")
+	}
+}
+
 func TestChannelSelectedInvokesMembershipFetcher(t *testing.T) {
 	app := NewApp()
 	app.activeTeamID = "T1"
