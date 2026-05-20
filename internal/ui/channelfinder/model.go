@@ -5,6 +5,7 @@ import (
 	"strings"
 
 	"charm.land/lipgloss/v2"
+	"github.com/gammons/slk/internal/text"
 	"github.com/gammons/slk/internal/ui/messages"
 	"github.com/gammons/slk/internal/ui/overlay"
 	"github.com/gammons/slk/internal/ui/styles"
@@ -203,7 +204,7 @@ func (m *Model) HandleKey(keyStr string) *ChannelResult {
 //     hits score higher.
 func (m *Model) filter() {
 	m.filtered = nil
-	q := strings.ToLower(m.query)
+	q := text.Fold(m.query)
 
 	if q == "" {
 		idxs := make([]int, len(m.items))
@@ -225,7 +226,7 @@ func (m *Model) filter() {
 
 	var matches []match
 	for i, item := range m.items {
-		name := strings.ToLower(item.Name)
+		name := text.Fold(item.Name)
 		switch {
 		case strings.HasPrefix(name, q):
 			matches = append(matches, match{idx: i, tier: 0})

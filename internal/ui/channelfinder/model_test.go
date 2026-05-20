@@ -648,3 +648,44 @@ func TestFilterWithQueryMatchTierStillWins(t *testing.T) {
 		t.Errorf("prefix match should beat newer substring match, got %q first", first)
 	}
 }
+
+// TestFilterAccentInsensitive proves that an ASCII query matches a
+// candidate that has diacritics (issue #14). Drives m.query directly
+// rather than via HandleKey, because HandleKey currently restricts input
+// to single-byte printable ASCII (model.go:179) — that input-side
+// limitation is a separate concern from the matching behavior under test.
+func TestFilterAccentInsensitive(t *testing.T) {
+	items := []Item{
+		{ID: "D1", Name: "Mélanie", Type: "dm", LastVisited: 100},
+		{ID: "D2", Name: "François", Type: "dm", LastVisited: 90},
+		{ID: "C1", Name: "café-discussion", Type: "channel", LastVisited: 80},
+	}
+	cases := []struct {
+		query   string
+		wantID  string
+		comment string
+	}{
+		{"melanie", "D1", "prefix match without accents"},
+		{"francois", "D2", "substring match without cedilla"},
+		{"cafe", "C1", "prefix match without acute"},
+		{"Mélanie", "D1", "accented query also matches accented candidate"},
+	}
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.query, func(t *testing.T) {
+			m := New()
+			m.SetItems(items)
+			m.Open()
+			m.query = tc.query
+			m.filter()
+			if len(m.filtered) == 0 {
+				t.Fatalf("expected at least 1 match for %q (%s)", tc.query, tc.comment)
+			}
+			gotID := m.items[m.filtered[0]].ID
+			if gotID != tc.wantID {
+				t.Errorf("query %q: expected first match %s, got %s (%s)",
+					tc.query, tc.wantID, gotID, tc.comment)
+			}
+		})
+	}
+}
