@@ -5,6 +5,7 @@ import (
 	"strings"
 
 	"charm.land/lipgloss/v2"
+	"github.com/gammons/slk/internal/text"
 	"github.com/gammons/slk/internal/ui/styles"
 )
 
@@ -106,19 +107,19 @@ func (m *Model) Select() *MentionResult {
 }
 
 func (m *Model) filter() {
-	q := strings.ToLower(m.query)
+	q := text.Fold(m.query)
 	var results []User
 
 	// Special mentions first
 	for _, u := range specialMentions {
-		if q == "" || strings.HasPrefix(strings.ToLower(u.DisplayName), q) || strings.HasPrefix(strings.ToLower(u.Username), q) {
+		if q == "" || strings.HasPrefix(text.Fold(u.DisplayName), q) || strings.HasPrefix(text.Fold(u.Username), q) {
 			results = append(results, u)
 		}
 	}
 
 	// Then regular users
 	for _, u := range m.users {
-		if q == "" || strings.HasPrefix(strings.ToLower(u.DisplayName), q) || strings.HasPrefix(strings.ToLower(u.Username), q) {
+		if q == "" || strings.HasPrefix(text.Fold(u.DisplayName), q) || strings.HasPrefix(text.Fold(u.Username), q) {
 			results = append(results, u)
 		}
 	}

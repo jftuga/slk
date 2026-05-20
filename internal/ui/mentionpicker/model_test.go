@@ -153,3 +153,34 @@ func TestSelectEmptyReturnsNil(t *testing.T) {
 		t.Error("expected nil result for empty filtered list")
 	}
 }
+
+func TestFilterAccentInsensitive(t *testing.T) {
+	m := New()
+	m.SetUsers([]User{
+		{ID: "U1", DisplayName: "François", Username: "françois.b"},
+		{ID: "U2", DisplayName: "Mélanie", Username: "mélanie"},
+		{ID: "U3", DisplayName: "Alice", Username: "alice"},
+	})
+	cases := []struct {
+		query  string
+		wantID string
+	}{
+		{"francois", "U1"},
+		{"melanie", "U2"},
+		{"François", "U1"},
+	}
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.query, func(t *testing.T) {
+			m.Open()
+			m.SetQuery(tc.query)
+			if len(m.Filtered()) == 0 {
+				t.Fatalf("expected at least 1 match for %q", tc.query)
+			}
+			if m.Filtered()[0].ID != tc.wantID {
+				t.Errorf("query %q: expected %s, got %s",
+					tc.query, tc.wantID, m.Filtered()[0].ID)
+			}
+		})
+	}
+}
