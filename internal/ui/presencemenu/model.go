@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"charm.land/lipgloss/v2"
+	"github.com/gammons/slk/internal/text"
 	"github.com/gammons/slk/internal/ui/messages"
 	"github.com/gammons/slk/internal/ui/overlay"
 	"github.com/gammons/slk/internal/ui/styles"
@@ -170,7 +171,7 @@ func (m *Model) HandleKey(keyStr string) *Result {
 // filter rebuilds the filtered list based on the current query.
 func (m *Model) filter() {
 	m.filtered = nil
-	q := strings.ToLower(m.query)
+	q := text.Fold(m.query)
 	if q == "" {
 		for i := range m.items {
 			m.filtered = append(m.filtered, i)
@@ -179,7 +180,7 @@ func (m *Model) filter() {
 	}
 	var prefix, sub []int
 	for i, it := range m.items {
-		name := strings.ToLower(it.label)
+		name := text.Fold(it.label)
 		switch {
 		case strings.HasPrefix(name, q):
 			prefix = append(prefix, i)
