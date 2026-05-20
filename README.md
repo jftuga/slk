@@ -70,6 +70,25 @@ slk --add-workspace
 
 Full walkthrough: [Setup wiki page](https://github.com/gammons/slk/wiki/Setup).
 
+## Enterprise Grid
+
+slk authenticates via the same `xoxc` browser session token and `d`
+cookie that `app.slack.com` uses. Every outbound request to `*.slack.com`
+is decorated with browser-like headers (`User-Agent`, `Origin`,
+`Referer`, `Sec-Fetch-*`) so Slack's anomaly detectors should treat the
+traffic the same way they treat the browser tab the token was extracted
+from.
+
+This is best-effort mitigation, not a contract. Your IT policy may still
+flag slk regardless. If you're on Enterprise Grid and slk signs you out
+or triggers a security email after login, please file an issue with:
+
+1. The exact email or notification text Slack sent.
+2. Whether you got logged out of *all* sessions or only slk's.
+3. The output of `slk --version`.
+
+See [#5](https://github.com/gammons/slk/issues/5) for history.
+
 ## Inline images in tmux
 
 If you run `slk` inside tmux on a Kitty-capable terminal (Kitty, Ghostty,
