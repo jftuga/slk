@@ -776,6 +776,16 @@ type App struct {
 	// sub-component's API.
 	userNames map[string]string
 
+	// externalUsers tracks which user IDs are Slack Connect / shared-channel
+	// guests. Populated by main.go via SetExternalUsers as users are
+	// resolved. Read by SetUserNames when building the mention-picker User
+	// slice so IsExternal is set on each entry.
+	externalUsers map[string]bool
+	// channelMembershipFetcher is invoked on every ChannelSelectedMsg to
+	// prompt the membership.Manager to ensure-fresh the new active channel.
+	// nil-safe.
+	channelMembershipFetcher func(channelID string)
+
 	// Last (channelID, threadTS) auto-opened from the threads view.
 	// openSelectedThreadCmd compares against these to dedup repeat calls
 	// (j/k keystrokes and ThreadsListLoadedMsg refreshes both fire
@@ -991,6 +1001,7 @@ func NewApp() *App {
 		lastSelfSendByChannel: make(map[string]time.Time),
 		threadsDirtyDebounce: 150 * time.Millisecond,
 		userNames:            map[string]string{},
+		externalUsers:        map[string]bool{},
 		statusByTeam:         map[string]workspaceStatus{},
 		lastChannelByTeam:    map[string]string{},
 		navHistory:           make(map[string]*navStack),
@@ -1550,6 +1561,11 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		a.messagepane.SetChannelType(msg.Type)
 
 		a.compose.SetChannel(msg.Name)
+		a.compose.SetActiveChannel(msg.ID)
+		a.threadCompose.SetActiveChannel(msg.ID)
+		if a.channelMembershipFetcher != nil {
+			a.channelMembershipFetcher(msg.ID)
+		}
 		a.statusbar.SetChannel(msg.Name)
 		a.statusbar.SetChannelType(msg.Type)
 
@@ -4786,10 +4802,39 @@ func (a *App) SetUserNames(names map[string]string) {
 			ID:          id,
 			DisplayName: displayName,
 			Username:    "",
+			IsExternal:  a.externalUsers[id],
 		})
 	}
 	a.compose.SetUsers(users)
 	a.threadCompose.SetUsers(users)
+}
+
+// SetExternalUsers replaces the set of user IDs known to be Slack
+// Connect / shared-channel guests. Sticky: subsequent SetUserNames
+// calls consult this map when building mention-picker entries.
+// Pass an empty map (or nil) to clear.
+func (a *App) SetExternalUsers(externalIDs map[string]bool) {
+	if externalIDs == nil {
+		externalIDs = map[string]bool{}
+	}
+	a.externalUsers = externalIDs
+	if len(a.userNames) > 0 {
+		a.SetUserNames(a.userNames)
+	}
+}
+
+// SetChannelMembership forwards channel-member IDs to both compose
+// pickers. Called by main.go from the membership.Manager.
+func (a *App) SetChannelMembership(channelID string, memberIDs []string) {
+	a.compose.SetChannelMembership(channelID, memberIDs)
+	a.threadCompose.SetChannelMembership(channelID, memberIDs)
+}
+
+// SetChannelMembershipFetcher registers a callback invoked on every
+// ChannelSelectedMsg with the newly active channel ID. main.go wires
+// this to membership.Manager.EnsureFresh.
+func (a *App) SetChannelMembershipFetcher(fn func(channelID string)) {
+	a.channelMembershipFetcher = fn
 }
 
 // SetCustomEmoji rebuilds the emoji entry list (built-ins + the active

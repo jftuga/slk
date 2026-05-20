@@ -3988,3 +3988,66 @@ func TestChannelSelected_UnknownFreshnessWithCache_FallsToTier2(t *testing.T) {
 		t.Errorf("unknown freshness with cache: fetcher should fire once; got %d", fetchCalled)
 	}
 }
+
+func TestSetChannelMembershipForwardsToCompose(t *testing.T) {
+	app := NewApp()
+	app.activeTeamID = "T1"
+	app.activeChannelID = "C1"
+	app.compose.SetActiveChannel("C1")
+	app.threadCompose.SetActiveChannel("C1")
+	app.SetUserNames(map[string]string{"U1": "alice", "U2": "bob"})
+
+	app.SetChannelMembership("C1", []string{"U1"})
+
+	users := app.compose.MentionUsers()
+	byName := map[string]bool{}
+	for _, u := range users {
+		byName[u.DisplayName] = u.InChannel
+	}
+	if !byName["alice"] {
+		t.Error("alice should be in-channel")
+	}
+	if byName["bob"] {
+		t.Error("bob should be not-in-channel")
+	}
+}
+
+func TestSetExternalUsersPropagates(t *testing.T) {
+	app := NewApp()
+	app.activeTeamID = "T1"
+	app.SetExternalUsers(map[string]bool{"U_EXT": true})
+	app.SetUserNames(map[string]string{"U_EXT": "ext.user", "U1": "alice"})
+	app.activeChannelID = "C1"
+	app.compose.SetActiveChannel("C1")
+	app.threadCompose.SetActiveChannel("C1")
+	app.SetChannelMembership("C1", []string{"U_EXT", "U1"})
+
+	found := false
+	for _, u := range app.compose.MentionUsers() {
+		if u.ID == "U_EXT" {
+			found = true
+			if !u.IsExternal {
+				t.Error("U_EXT should be flagged IsExternal")
+			}
+		}
+	}
+	if !found {
+		t.Error("U_EXT missing from picker users")
+	}
+}
+
+func TestChannelSelectedInvokesMembershipFetcher(t *testing.T) {
+	app := NewApp()
+	app.activeTeamID = "T1"
+	var fetched []string
+	app.SetChannelMembershipFetcher(func(channelID string) { fetched = append(fetched, channelID) })
+
+	_, _ = app.Update(ChannelSelectedMsg{ID: "C42", Name: "general", Type: "channel"})
+
+	if len(fetched) != 1 || fetched[0] != "C42" {
+		t.Errorf("fetcher invoked with %v, want [C42]", fetched)
+	}
+	if app.compose.ActiveChannel() != "C42" {
+		t.Errorf("compose active channel = %q, want C42", app.compose.ActiveChannel())
+	}
+}
