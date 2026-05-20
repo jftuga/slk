@@ -27,6 +27,7 @@ import (
 	"github.com/gammons/slk/internal/notify"
 	"github.com/gammons/slk/internal/service"
 	slackclient "github.com/gammons/slk/internal/slack"
+	"github.com/gammons/slk/internal/slack/membership"
 	"github.com/gammons/slk/internal/ui"
 	"github.com/gammons/slk/internal/ui/channelfinder"
 	"github.com/gammons/slk/internal/ui/compose"
@@ -178,6 +179,12 @@ type WorkspaceContext struct {
 	// fetch; the goroutine emits ui.UserResolvedMsg back into the
 	// program, which patches in-history rows live.
 	UserResolver *userResolver
+	// Membership owns per-channel member sets for this workspace:
+	// SQLite-backed cache + eager fetch on channel switch + live
+	// member_joined/left WS deltas + external-user resolution. Set
+	// in connectWorkspace alongside UserResolver (it depends on the
+	// resolver to trigger external-user lookups for newly-seen IDs).
+	Membership *membership.Manager
 }
 
 // workspaceRouter holds the program-wide "active workspace" pointer.
@@ -242,6 +249,25 @@ func (r *userResolver) Request(userID string) {
 		return
 	}
 	if _, exists := r.inflight.LoadOrStore(userID, struct{}{}); exists {
+		return
+	}
+	// Skip if already resolved (in cache.User). This is the hot path
+	// for membership.Manager which calls Request for every channel
+	// member returned by conversations.members; without this, every
+	// channel-switch refetches users.info for each member, which is
+	// O(channel-size) API calls per switch (a 1000-member shared
+	// channel = 1000 calls). Stale-data refresh is the responsibility
+	// of an explicit re-resolution path (not implemented here); this
+	// gate is for "first time we see this user".
+	//
+	// Order matters: inflight.LoadOrStore first (claim the slot),
+	// THEN the cache check (bail if cached), with inflight.Delete on
+	// the bail path. This avoids a race where two concurrent Requests
+	// both miss the cache, both then LoadOrStore (one wins, the loser
+	// silently returns). Store-first + check-second means at most one
+	// goroutine ever passes the cache check.
+	if _, err := r.db.GetUser(userID); err == nil {
+		r.inflight.Delete(userID)
 		return
 	}
 	go func() {
@@ -911,6 +937,14 @@ func run() error {
 			return db.GetChannelSyncedAt(channelID)
 		})
 
+		app.SetChannelMembershipFetcher(func(channelID string) {
+			wctx := router.Active()
+			if wctx == nil || wctx.Membership == nil {
+				return
+			}
+			wctx.Membership.EnsureFresh(context.Background(), channelID)
+		})
+
 		app.SetChannelFetcher(func(channelID, channelName string) tea.Msg {
 			wctx := router.Active()
 			if wctx == nil {
@@ -1248,6 +1282,19 @@ func run() error {
 		activeTeamID = teamID
 		router.Set(wctx)
 
+		// Build external-user set from cached records so the mention
+		// picker reflects Slack Connect / shared-channel guest status
+		// for the workspace we're switching into. Best-effort: empty
+		// map on error.
+		external := map[string]bool{}
+		if users, err := db.ListUsers(wctx.TeamID); err == nil {
+			for _, u := range users {
+				if u.IsExternal {
+					external[u.ID] = true
+				}
+			}
+		}
+
 		return ui.WorkspaceSwitchedMsg{
 			TeamID:           wctx.TeamID,
 			TeamName:         wctx.TeamName,
@@ -1255,6 +1302,7 @@ func run() error {
 			Channels:         wctx.Channels,
 			FinderItems:      wctx.FinderItems,
 			UserNames:        wctx.UserNames,
+			ExternalUsers:    external,
 			UserID:           wctx.UserID,
 			CustomEmoji:      wctx.CustomEmoji,
 			SectionsProvider: sectionsProviderAdapter{store: wctx.SectionStore},
@@ -1376,6 +1424,21 @@ func run() error {
 			wctx.ConnMgr = slackclient.NewConnectionManager(wctx.Client, handler)
 			go wctx.ConnMgr.Run(ctx)
 
+			// Build external-user set from cached records so the
+			// mention picker can flag Slack Connect / shared-channel
+			// guests on first render, without waiting for fresh
+			// userResolver lookups. Best-effort: empty map on error
+			// (the picker just won't flag anyone until live resolution
+			// fires).
+			external := map[string]bool{}
+			if users, err := db.ListUsers(wctx.TeamID); err == nil {
+				for _, u := range users {
+					if u.IsExternal {
+						external[u.ID] = true
+					}
+				}
+			}
+
 			p.Send(ui.WorkspaceReadyMsg{
 				TeamID:           wctx.TeamID,
 				TeamName:         wctx.TeamName,
@@ -1383,6 +1446,7 @@ func run() error {
 				Channels:         wctx.Channels,
 				FinderItems:      wctx.FinderItems,
 				UserNames:        wctx.UserNames,
+				ExternalUsers:    external,
 				UserID:           wctx.UserID,
 				CustomEmoji:      wctx.CustomEmoji, // empty at this point; filled by the goroutine below
 				SectionsProvider: sectionsProviderAdapter{store: wctx.SectionStore},
@@ -1534,6 +1598,23 @@ func connectWorkspace(ctx context.Context, token slackclient.Token, db *cache.DB
 		},
 	)
 
+	// Per-workspace channel-membership manager. *slackclient.Client
+	// structurally satisfies membership.ConversationMemberAPI; the
+	// user resolver satisfies membership.UserResolver. The push
+	// callback funnels member-set snapshots into the App via
+	// ui.ChannelMembershipMsg for picker hydration.
+	wctx.Membership = membership.New(
+		wctx.TeamID,
+		wctx.Client,
+		db,
+		func(channelID string, memberIDs []string) {
+			if p != nil {
+				p.Send(ui.ChannelMembershipMsg{ChannelID: channelID, MemberIDs: memberIDs})
+			}
+		},
+		wctx.UserResolver,
+	)
+
 	// Seed last-visited timestamps for the channel finder's recency
 	// sort. Best-effort: failure is logged and the map stays empty,
 	// which means the finder uses its default order until the user
@@ -1608,6 +1689,11 @@ func connectWorkspace(ctx context.Context, token slackclient.Token, db *cache.DB
 			if isBot {
 				wctx.BotUserIDs[u.ID] = true
 			}
+			// Slack Connect / shared-channel guests have a TeamID
+			// that differs from this workspace's home TeamID. Empty
+			// TeamID is treated as internal (under-detect rather than
+			// falsely flag). Mirrors userResolver.Request semantics.
+			isExternal := u.TeamID != "" && u.TeamID != client.TeamID()
 			db.UpsertUser(cache.User{
 				ID:          u.ID,
 				WorkspaceID: client.TeamID(),
@@ -1616,6 +1702,7 @@ func connectWorkspace(ctx context.Context, token slackclient.Token, db *cache.DB
 				AvatarURL:   u.Profile.Image32,
 				Presence:    "away",
 				IsBot:       isBot,
+				IsExternal:  isExternal,
 			})
 			// Record the avatar URL for lazy fetch (mirrors the cached-
 			// user seed above). The eager Preload was the second wave
@@ -1893,6 +1980,7 @@ func resolveUser(client *slackclient.Client, userID string, userNames map[string
 			// Have name but no avatar — try to fetch profile for avatar URL
 			if u, err := client.GetUserProfile(userID); err == nil {
 				isBot := u.IsBot || u.IsAppUser
+				isExternal := u.TeamID != "" && u.TeamID != client.TeamID()
 				avatarCache.Preload(userID, u.Profile.Image32)
 				db.UpsertUser(cache.User{
 					ID:          userID,
@@ -1902,6 +1990,7 @@ func resolveUser(client *slackclient.Client, userID string, userNames map[string
 					AvatarURL:   u.Profile.Image32,
 					Presence:    "away",
 					IsBot:       isBot,
+					IsExternal:  isExternal,
 				})
 				return name, isBot
 			}
@@ -1918,6 +2007,7 @@ func resolveUser(client *slackclient.Client, userID string, userNames map[string
 			name = u.Name
 		}
 		isBot := u.IsBot || u.IsAppUser
+		isExternal := u.TeamID != "" && u.TeamID != client.TeamID()
 		userNames[userID] = name
 		avatarCache.Preload(userID, u.Profile.Image32)
 		db.UpsertUser(cache.User{
@@ -1928,6 +2018,7 @@ func resolveUser(client *slackclient.Client, userID string, userNames map[string
 			AvatarURL:   u.Profile.Image32,
 			Presence:    "away",
 			IsBot:       isBot,
+			IsExternal:  isExternal,
 		})
 		return name, isBot
 	}
@@ -2871,6 +2962,19 @@ func (h *rtmEventHandler) OnConnect() {
 	// GetHistorySince calls return zero messages quickly. The 4-wide
 	// concurrency cap bounds the cost.
 	h.triggerBackfill("reconnect")
+
+	// Force-stale the active channel's membership cache and re-fetch.
+	// The WS may have missed member_joined/left deltas during the
+	// disconnect window; a fresh full fetch reconciles divergence.
+	// Inactive channels stay as-is — they'll re-fetch on their next
+	// EnsureFresh via the channel-switch fetcher path.
+	if h.wsCtx != nil && h.wsCtx.Membership != nil && h.activeChannelID != nil {
+		activeID := h.activeChannelID()
+		if activeID != "" {
+			h.wsCtx.Membership.ForceStale(activeID)
+			h.wsCtx.Membership.EnsureFresh(context.Background(), activeID)
+		}
+	}
 }
 
 // triggerBackfill kicks off a reconnect-style backfill pass for this
@@ -3239,11 +3343,17 @@ func (h *rtmEventHandler) OnPrefChange(name, value string) {
 }
 
 func (h *rtmEventHandler) OnMemberJoined(channelID, userID string) {
-	// TODO(membership-plan-task-13): wire to membership.Manager.
+	if h.wsCtx == nil || h.wsCtx.Membership == nil {
+		return
+	}
+	h.wsCtx.Membership.ApplyJoin(channelID, userID)
 }
 
 func (h *rtmEventHandler) OnMemberLeft(channelID, userID string) {
-	// TODO(membership-plan-task-13): wire to membership.Manager.
+	if h.wsCtx == nil || h.wsCtx.Membership == nil {
+		return
+	}
+	h.wsCtx.Membership.ApplyLeave(channelID, userID)
 }
 
 // refreshMutedForActive walks wctx.Channels, refreshes each item's

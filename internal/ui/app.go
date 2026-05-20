@@ -242,8 +242,15 @@ type (
 		Channels    []sidebar.ChannelItem
 		FinderItems []channelfinder.Item
 		UserNames   map[string]string
-		UserID      string
-		CustomEmoji map[string]string
+		// ExternalUsers maps userID -> true for users this workspace
+		// considers Slack Connect / shared-channel guests. Hydrated from
+		// cache.User.IsExternal so the mention picker can flag externals
+		// at workspace-switch time, before any new userResolver lookups
+		// fire. Order matters: the App handler applies this BEFORE
+		// SetUserNames so the picker rebuild sees the external flags.
+		ExternalUsers map[string]bool
+		UserID        string
+		CustomEmoji   map[string]string
 		// SectionsProvider supplies Slack-native sidebar sections for this
 		// workspace. Nil means "use config-glob behavior" (the App's
 		// sidebar reverts to its existing name-keyed buckets).
@@ -294,8 +301,15 @@ type (
 		Channels    []sidebar.ChannelItem
 		FinderItems []channelfinder.Item
 		UserNames   map[string]string
-		UserID      string
-		CustomEmoji map[string]string
+		// ExternalUsers maps userID -> true for users this workspace
+		// considers Slack Connect / shared-channel guests. Hydrated from
+		// cache.User.IsExternal so the mention picker can flag externals
+		// on startup, before any new userResolver lookups fire. Order
+		// matters: the App handler applies this BEFORE SetUserNames so
+		// the picker rebuild sees the external flags.
+		ExternalUsers map[string]bool
+		UserID        string
+		CustomEmoji   map[string]string
 		// SectionsProvider supplies Slack-native sidebar sections for this
 		// workspace. Nil means "use config-glob behavior" (the App's
 		// sidebar reverts to its existing name-keyed buckets).
@@ -1577,6 +1591,14 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		a.messagepane.SetChannel(msg.Name, "")
 		a.messagepane.SetChannelType(msg.Type)
 
+		// Close any open mention picker before switching channels.
+		// SetUsers replaces the user list but does NOT re-run the
+		// picker's filter, so an open picker would render the
+		// previous channel's matches until the user typed or moved.
+		// CloseMention is nil-safe (no-op when already closed).
+		a.compose.CloseMention()
+		a.threadCompose.CloseMention()
+
 		a.compose.SetChannel(msg.Name)
 		a.compose.SetActiveChannel(msg.ID)
 		a.threadCompose.SetActiveChannel(msg.ID)
@@ -2369,6 +2391,9 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		a.sidebar.SetSectionsProvider(msg.SectionsProvider)
 		a.SetChannels(msg.Channels)
 		a.channelFinder.SetItems(msg.FinderItems)
+		// SetExternalUsers re-pushes user-names; calling SetUserNames
+		// last is the canonical state.
+		a.SetExternalUsers(msg.ExternalUsers)
 		a.SetUserNames(msg.UserNames)
 		a.SetCustomEmoji(msg.CustomEmoji)
 		a.currentUserID = msg.UserID
@@ -2498,6 +2523,9 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			a.sidebar.SetSectionsProvider(msg.SectionsProvider)
 			a.SetChannels(msg.Channels)
 			a.channelFinder.SetItems(msg.FinderItems)
+			// SetExternalUsers re-pushes user-names; calling SetUserNames
+			// last is the canonical state.
+			a.SetExternalUsers(msg.ExternalUsers)
 			a.SetUserNames(msg.UserNames)
 			a.SetCustomEmoji(msg.CustomEmoji)
 			a.currentUserID = msg.UserID
