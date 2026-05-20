@@ -8,6 +8,7 @@ import (
 
 	"charm.land/lipgloss/v2"
 	"github.com/gammons/slk/internal/cache"
+	"github.com/gammons/slk/internal/text"
 	"github.com/gammons/slk/internal/ui/messages"
 	"github.com/gammons/slk/internal/ui/styles"
 	kyoemoji "github.com/kyokomi/emoji/v2"
@@ -782,7 +783,7 @@ func (m *Model) SelectByID(id string) {
 
 func (m *Model) rebuildFilter() {
 	m.filtered = nil
-	lower := strings.ToLower(m.filter)
+	lower := text.Fold(m.filter)
 	now := m.now()
 	// Fetch read state once for the whole filter pass so IsStale can
 	// see the same hasUnread/lastReadTS the rest of the sidebar does.
@@ -794,7 +795,7 @@ func (m *Model) rebuildFilter() {
 		readState = m.readStateReader()
 	}
 	for i, item := range m.items {
-		if m.filter != "" && !strings.Contains(strings.ToLower(item.Name), lower) {
+		if m.filter != "" && !strings.Contains(text.Fold(item.Name), lower) {
 			continue
 		}
 		// Staleness filter: drop items the user hasn't read in a long
