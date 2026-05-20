@@ -51,7 +51,15 @@ var kittyDiacritics = []rune{
 	0x1D189, 0x1D1AA, 0x1D1AB, 0x1D1AC, 0x1D1AD, 0x1D242, 0x1D243, 0x1D244,
 }
 
-const placeholderRune = '\U0010EEEE'
+// PlaceholderRune is the kitty graphics protocol's unicode placeholder
+// (U+10EEEE). Each cell whose content is this rune carries an image
+// reference in its SGR foreground color (24-bit RGB encoding the image
+// ID); any downstream pass that mutates cell colors must leave these
+// cells alone or the encoded ID will change and the terminal will
+// resolve a different (or non-existent) image. Exported so the
+// overlay/dim pipeline can detect these cells without taking a heavy
+// dependency on internal/image's renderer.
+const PlaceholderRune = '\U0010EEEE'
 
 func inTmux() bool {
 	return os.Getenv("TMUX") != ""
@@ -231,7 +239,7 @@ func buildPlaceholderLines(id uint32, cells image.Point) []string {
 		sb.WriteString(sgr)
 		rowDia := diacritic(row)
 		for col := 0; col < cells.X; col++ {
-			sb.WriteRune(placeholderRune)
+			sb.WriteRune(PlaceholderRune)
 			sb.WriteRune(rowDia)
 			sb.WriteRune(diacritic(col))
 		}
