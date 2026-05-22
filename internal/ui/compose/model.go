@@ -41,6 +41,19 @@ type Model struct {
 	users           []mentionpicker.User
 	reverseNames    map[string]string // displayName -> userID
 
+	// activeChannelID is the channel currently shown in the messages
+	// pane. Drives the InChannel computation when rebuilding the
+	// derived mention-picker user list. Updated via SetActiveChannel.
+	activeChannelID string
+	// channelMembers maps channelID -> set of user IDs. We keep all
+	// channels we've seen so a rapid A→B→A switch doesn't lose state,
+	// but only the activeChannelID drives the derived picker list.
+	channelMembers map[string]map[string]struct{}
+	// channelMembersOK records whether membership data has been loaded
+	// for a channel. Used to distinguish "no members" (empty set, after
+	// load) from "not loaded yet" (default-everyone-in-channel state).
+	channelMembersOK map[string]bool
+
 	// Channel picker state. Mirrors the mention picker exactly:
 	// channelStartCol is the byte offset of the FIRST CHARACTER AFTER
 	// the trigger '#' within input.Value() (the '#' itself sits at
@@ -740,15 +753,95 @@ func (m Model) ChannelPickerView(width int) string {
 }
 
 // SetUsers provides the list of workspace users for mention autocomplete.
+// The stored list is the canonical workspace roster; the derived
+// []mentionpicker.User pushed to the embedded picker is recomputed by
+// rebuildMentionUsers, which carries IsExternal forward and computes
+// InChannel from the active channel's member set (if loaded).
 func (m *Model) SetUsers(users []mentionpicker.User) {
 	m.users = users
-	m.mentionPicker.SetUsers(users)
 	m.reverseNames = make(map[string]string)
 	for _, u := range users {
 		if u.DisplayName != "" {
 			m.reverseNames[u.DisplayName] = u.ID
 		}
 	}
+	m.rebuildMentionUsers()
+}
+
+// SetActiveChannel tells the compose model which channel context to
+// use when computing InChannel for the mention picker. Called from
+// App on every ChannelSelectedMsg. Idempotent: a no-op if the channel
+// hasn't actually changed (avoids needless picker rebuilds on the
+// hot reselect path).
+func (m *Model) SetActiveChannel(channelID string) {
+	if m.activeChannelID == channelID {
+		return
+	}
+	m.activeChannelID = channelID
+	m.rebuildMentionUsers()
+}
+
+// ActiveChannel returns the channel ID currently active for
+// mention-picker context.
+func (m *Model) ActiveChannel() string { return m.activeChannelID }
+
+// SetChannelMembership records the member set for a channel and, if
+// that channel is active, rebuilds the picker's user list. Membership
+// for non-active channels is still stored so a rapid A→B→A switch
+// doesn't lose state; only the active channel drives the visible
+// picker view.
+func (m *Model) SetChannelMembership(channelID string, memberIDs []string) {
+	set := make(map[string]struct{}, len(memberIDs))
+	for _, id := range memberIDs {
+		set[id] = struct{}{}
+	}
+	if m.channelMembers == nil {
+		m.channelMembers = map[string]map[string]struct{}{}
+	}
+	if m.channelMembersOK == nil {
+		m.channelMembersOK = map[string]bool{}
+	}
+	m.channelMembers[channelID] = set
+	m.channelMembersOK[channelID] = true
+	if channelID == m.activeChannelID {
+		m.rebuildMentionUsers()
+	}
+}
+
+// MentionUsers returns the most recent derived user list handed to
+// the embedded picker. Intended for tests.
+func (m *Model) MentionUsers() []mentionpicker.User {
+	return m.mentionPicker.Users()
+}
+
+// rebuildMentionUsers recomputes the derived []mentionpicker.User
+// for the active channel and pushes it to the embedded picker.
+//
+// Rules:
+//   - If membership data for activeChannelID is not yet loaded, every
+//     user defaults to InChannel=true (preserves today's behavior on
+//     first switch; spec's "Loading state" section).
+//   - If membership is loaded, InChannel = userID ∈ memberIDs.
+//   - External users that are NOT in the active channel are omitted
+//     entirely (spec's "External user visibility rule" — no
+//     "(ext) (not in channel)" combination).
+func (m *Model) rebuildMentionUsers() {
+	members := m.channelMembers[m.activeChannelID]
+	loaded := m.channelMembersOK[m.activeChannelID]
+
+	derived := make([]mentionpicker.User, 0, len(m.users))
+	for _, u := range m.users {
+		inCh := true
+		if loaded {
+			_, inCh = members[u.ID]
+		}
+		if u.IsExternal && !inCh {
+			continue
+		}
+		u.InChannel = inCh
+		derived = append(derived, u)
+	}
+	m.mentionPicker.SetUsers(derived)
 }
 
 // IsMentionActive returns whether the mention picker is currently showing.

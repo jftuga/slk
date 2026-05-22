@@ -27,6 +27,7 @@ type SlackAPI interface {
 	GetConversationHistory(params *slack.GetConversationHistoryParameters) (*slack.GetConversationHistoryResponse, error)
 	GetConversationReplies(params *slack.GetConversationRepliesParameters) ([]slack.Message, bool, string, error)
 	GetUsersContext(ctx context.Context, options ...slack.GetUsersOption) ([]slack.User, error)
+	GetUsersInConversationContext(ctx context.Context, params *slack.GetUsersInConversationParameters) ([]string, string, error)
 	GetUserInfo(user string) (*slack.User, error)
 	GetEmoji() (map[string]string, error)
 	PostMessage(channelID string, options ...slack.MsgOption) (string, string, error)
@@ -413,6 +414,55 @@ func (c *Client) GetAllPublicChannels(ctx context.Context) ([]slack.Channel, err
 	}
 
 	return allChannels, nil
+}
+
+// GetUsersInConversation returns all user IDs that are members of the
+// given conversation (channel, DM, group DM, or shared channel). Paginates
+// 1000 IDs per page. On 429 responses, sleeps the server-advised RetryAfter
+// (defaulting to 30s if zero) and retries the same page; honors ctx
+// cancellation both between iterations and during the rate-limit sleep.
+// Mirrors GetAllPublicChannels' loop structure.
+func (c *Client) GetUsersInConversation(ctx context.Context, channelID string) ([]string, error) {
+	var all []string
+	cursor := ""
+
+	for {
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		default:
+		}
+
+		params := &slack.GetUsersInConversationParameters{
+			ChannelID: channelID,
+			Cursor:    cursor,
+			Limit:     1000,
+		}
+
+		users, next, err := c.api.GetUsersInConversationContext(ctx, params)
+		if err != nil {
+			if rlErr, ok := err.(*slack.RateLimitedError); ok {
+				wait := rlErr.RetryAfter
+				if wait == 0 {
+					wait = 30 * time.Second
+				}
+				select {
+				case <-ctx.Done():
+					return nil, ctx.Err()
+				case <-time.After(wait):
+				}
+				continue
+			}
+			return nil, fmt.Errorf("listing conversation members: %w", err)
+		}
+
+		all = append(all, users...)
+
+		if next == "" {
+			return all, nil
+		}
+		cursor = next
+	}
 }
 
 // JoinChannel joins a public channel via conversations.join. Returns nil on

@@ -1,6 +1,10 @@
 package mentionpicker
 
-import "testing"
+import (
+	"reflect"
+	"strings"
+	"testing"
+)
 
 func TestFilterByDisplayNamePrefix(t *testing.T) {
 	m := New()
@@ -59,9 +63,9 @@ func TestFilterEmptyQueryShowsAll(t *testing.T) {
 	})
 	m.Open()
 	m.SetQuery("")
-	// Empty query shows specials (3) + first users up to MaxVisible=5 total
-	if len(m.Filtered()) != 5 {
-		t.Fatalf("expected 5 filtered users (max), got %d", len(m.Filtered()))
+	// Empty query shows specials (3) + first users up to MaxVisible=7 total
+	if len(m.Filtered()) != 7 {
+		t.Fatalf("expected 7 filtered users (max), got %d", len(m.Filtered()))
 	}
 }
 
@@ -151,6 +155,115 @@ func TestSelectEmptyReturnsNil(t *testing.T) {
 	result := m.Select()
 	if result != nil {
 		t.Error("expected nil result for empty filtered list")
+	}
+}
+
+func TestFilterSortsInChannelBeforeNotInChannel(t *testing.T) {
+	m := New()
+	m.SetUsers([]User{
+		{ID: "U1", DisplayName: "alice", InChannel: false},
+		{ID: "U2", DisplayName: "bob", InChannel: true},
+		{ID: "U3", DisplayName: "charlie", InChannel: false},
+		{ID: "U4", DisplayName: "dan", InChannel: true},
+	})
+	m.Open()
+	got := m.Filtered()
+	// Special mentions match empty query too. Strip them to assert user order.
+	var names []string
+	for _, u := range got {
+		if u.ID == "U1" || u.ID == "U2" || u.ID == "U3" || u.ID == "U4" {
+			names = append(names, u.DisplayName)
+		}
+	}
+	want := []string{"bob", "dan", "alice", "charlie"}
+	if !reflect.DeepEqual(names, want) {
+		t.Errorf("user order = %v, want %v", names, want)
+	}
+}
+
+func TestFilterAlphabeticalWithinTier(t *testing.T) {
+	m := New()
+	m.SetUsers([]User{
+		{ID: "U1", DisplayName: "zoe", InChannel: true},
+		{ID: "U2", DisplayName: "alex", InChannel: true},
+		{ID: "U3", DisplayName: "mia", InChannel: true},
+	})
+	m.Open()
+	var names []string
+	for _, u := range m.Filtered() {
+		if u.ID != "" && u.ID[:1] == "U" {
+			names = append(names, u.DisplayName)
+		}
+	}
+	want := []string{"alex", "mia", "zoe"}
+	if !reflect.DeepEqual(names, want) {
+		t.Errorf("alpha order = %v, want %v", names, want)
+	}
+}
+
+func TestSpecialMentionsAlwaysInChannel(t *testing.T) {
+	m := New()
+	m.SetUsers(nil)
+	m.Open()
+	for _, u := range m.Filtered() {
+		if !u.InChannel {
+			t.Errorf("special mention %s should have InChannel=true", u.DisplayName)
+		}
+	}
+}
+
+func TestMaxVisibleSeven(t *testing.T) {
+	if MaxVisible != 7 {
+		t.Errorf("MaxVisible = %d, want 7", MaxVisible)
+	}
+}
+
+func TestViewNoEmptyParensForRegularUser(t *testing.T) {
+	m := New()
+	m.SetUsers([]User{{ID: "U1", DisplayName: "jane.doe", InChannel: true}})
+	m.Open()
+	out := m.View(40)
+	if strings.Contains(out, "()") {
+		t.Errorf("view contains empty parens: %q", out)
+	}
+	if !strings.Contains(out, "jane.doe") {
+		t.Errorf("view missing display name: %q", out)
+	}
+}
+
+func TestViewKeepsParensForSpecialMentions(t *testing.T) {
+	m := New()
+	m.SetUsers(nil)
+	m.Open()
+	out := m.View(40)
+	for _, want := range []string{"(here)", "(channel)", "(everyone)"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("view missing %q: %q", want, out)
+		}
+	}
+}
+
+func TestViewExternalSuffix(t *testing.T) {
+	m := New()
+	m.SetUsers([]User{
+		{ID: "U1", DisplayName: "jenny.kim", InChannel: true, IsExternal: true},
+	})
+	m.Open()
+	out := m.View(60)
+	if !strings.Contains(out, "(ext)") {
+		t.Errorf("expected (ext) suffix: %q", out)
+	}
+}
+
+func TestViewNotInChannelSuffix(t *testing.T) {
+	m := New()
+	m.SetUsers([]User{
+		{ID: "U1", DisplayName: "jordan.lee", InChannel: false},
+	})
+	m.Open()
+	out := m.View(60)
+	if !strings.Contains(out, "(not in channel)") {
+		t.Errorf("expected (not in channel) suffix: %q", out)
 	}
 }
 

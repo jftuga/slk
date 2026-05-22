@@ -990,3 +990,133 @@ func TestSetWidthReservesBackgroundMargin(t *testing.T) {
 		}
 	}
 }
+
+// TestSetChannelMembershipPopulatesInChannel verifies that after
+// SetChannelMembership is called for the active channel, the derived
+// mention picker user list reflects InChannel based on the member set.
+func TestSetChannelMembershipPopulatesInChannel(t *testing.T) {
+	m := New("test")
+	m.SetUsers([]mentionpicker.User{
+		{ID: "U1", DisplayName: "alice"},
+		{ID: "U2", DisplayName: "bob"},
+		{ID: "U3", DisplayName: "carol"},
+	})
+	m.SetActiveChannel("C1")
+	m.SetChannelMembership("C1", []string{"U1", "U3"})
+
+	got := map[string]bool{}
+	for _, u := range m.MentionUsers() {
+		got[u.DisplayName] = u.InChannel
+	}
+	if !got["alice"] || got["bob"] || !got["carol"] {
+		t.Errorf("InChannel mapping wrong: %+v", got)
+	}
+}
+
+// TestSetChannelMembershipFiltersExternalNotInChannel verifies the
+// spec rule: external users not in the active channel are omitted
+// entirely (no "(ext) (not in channel)" combination).
+func TestSetChannelMembershipFiltersExternalNotInChannel(t *testing.T) {
+	m := New("test")
+	m.SetUsers([]mentionpicker.User{
+		{ID: "U1", DisplayName: "alice"},
+		{ID: "U_EXT", DisplayName: "ext.user", IsExternal: true},
+	})
+	m.SetActiveChannel("C1")
+	m.SetChannelMembership("C1", []string{"U1"}) // ext.user NOT in C1
+
+	seen := map[string]bool{}
+	for _, u := range m.MentionUsers() {
+		seen[u.DisplayName] = true
+	}
+	if !seen["alice"] {
+		t.Error("alice should be visible")
+	}
+	if seen["ext.user"] {
+		t.Error("external user not in C1 should be filtered out, not just muted")
+	}
+}
+
+// TestSetChannelMembershipIncludesExternalInChannel verifies that an
+// external user who IS in the active channel passes through with both
+// InChannel and IsExternal preserved.
+func TestSetChannelMembershipIncludesExternalInChannel(t *testing.T) {
+	m := New("test")
+	m.SetUsers([]mentionpicker.User{
+		{ID: "U_EXT", DisplayName: "ext.user", IsExternal: true},
+	})
+	m.SetActiveChannel("C1")
+	m.SetChannelMembership("C1", []string{"U_EXT"})
+
+	found := false
+	for _, u := range m.MentionUsers() {
+		if u.DisplayName == "ext.user" {
+			found = true
+			if !u.InChannel || !u.IsExternal {
+				t.Errorf("external in-channel: got InChannel=%v IsExternal=%v",
+					u.InChannel, u.IsExternal)
+			}
+		}
+	}
+	if !found {
+		t.Error("external in-channel user missing")
+	}
+}
+
+// TestSetChannelMembershipDefaultsToInChannelWhenNotLoaded verifies
+// the spec's "Loading state": before any SetChannelMembership for the
+// active channel, every user renders as in-channel (preserves the
+// pre-channel-aware behavior while membership data is in flight).
+func TestSetChannelMembershipDefaultsToInChannelWhenNotLoaded(t *testing.T) {
+	m := New("test")
+	m.SetUsers([]mentionpicker.User{
+		{ID: "U1", DisplayName: "alice"},
+	})
+	m.SetActiveChannel("C1")
+	// No SetChannelMembership call yet.
+
+	for _, u := range m.MentionUsers() {
+		if !u.InChannel {
+			t.Errorf("loading state should default InChannel=true; got %+v", u)
+		}
+	}
+}
+
+// TestSetChannelMembershipForInactiveChannelDoesNotRebuild verifies
+// that membership data arriving for a non-active channel doesn't
+// disturb the active picker view (it's still stored, but not visible).
+func TestSetChannelMembershipForInactiveChannelDoesNotRebuild(t *testing.T) {
+	m := New("test")
+	m.SetUsers([]mentionpicker.User{
+		{ID: "U1", DisplayName: "alice"},
+	})
+	m.SetActiveChannel("C1")
+	// Membership for C2 arrives but C1 is active — should not affect C1.
+	m.SetChannelMembership("C2", []string{"U_OTHER"})
+
+	// alice should still be in-channel (loading state for C1 — no C1 data yet).
+	for _, u := range m.MentionUsers() {
+		if u.DisplayName == "alice" && !u.InChannel {
+			t.Error("inactive-channel membership should not affect active picker")
+		}
+	}
+}
+
+// TestSetChannelMembershipAfterLoadingFlipsInChannel verifies that
+// once an empty member set arrives for the active channel, the
+// loading-state default is replaced with the actual data.
+func TestSetChannelMembershipAfterLoadingFlipsInChannel(t *testing.T) {
+	m := New("test")
+	m.SetUsers([]mentionpicker.User{
+		{ID: "U1", DisplayName: "alice"},
+	})
+	m.SetActiveChannel("C1")
+	// Load C1 membership with empty set — alice is NOT a member.
+	m.SetChannelMembership("C1", []string{})
+
+	for _, u := range m.MentionUsers() {
+		if u.DisplayName == "alice" && u.InChannel {
+			t.Error("after empty C1 membership loads, alice should be not-in-channel")
+		}
+	}
+}

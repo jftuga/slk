@@ -237,6 +237,48 @@ func TestNew_SetsBusyTimeoutOnAllPoolConnections(t *testing.T) {
 	}
 }
 
+func TestMembershipSchema(t *testing.T) {
+	db, err := New(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	// Tables exist.
+	for _, table := range []string{"channel_members", "channel_membership_meta"} {
+		var name string
+		err := db.conn.QueryRow(
+			`SELECT name FROM sqlite_master WHERE type='table' AND name=?`, table,
+		).Scan(&name)
+		if err != nil {
+			t.Errorf("table %s missing: %v", table, err)
+		}
+	}
+
+	// is_external column present on users.
+	rows, err := db.conn.Query(`PRAGMA table_info(users)`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	found := false
+	for rows.Next() {
+		var cid int
+		var name, ctype string
+		var notnull, pk int
+		var dflt sql.NullString
+		if err := rows.Scan(&cid, &name, &ctype, &notnull, &dflt, &pk); err != nil {
+			t.Fatal(err)
+		}
+		if name == "is_external" {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("users.is_external column missing")
+	}
+}
+
 func TestMigrate_CreatesThreadSubscriptionsTable(t *testing.T) {
 	db := setupDBWithWorkspace(t)
 	// PRAGMA table_info returns one row per column on an existing

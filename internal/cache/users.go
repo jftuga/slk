@@ -13,22 +13,27 @@ type User struct {
 	// slack.User.IsBot and IsAppUser). Used to bucket their DMs into
 	// the "Apps" sidebar section so they don't clutter the human DM
 	// list.
-	IsBot     bool
-	UpdatedAt int64
+	IsBot bool
+	// IsExternal is true for users whose home team_id differs from
+	// the workspace's TeamID (Slack Connect / shared-channel guests).
+	// Set by the user-resolution path; persisted so we don't re-resolve.
+	IsExternal bool
+	UpdatedAt  int64
 }
 
 func (db *DB) UpsertUser(u User) error {
 	_, err := db.conn.Exec(`
-		INSERT INTO users (id, workspace_id, name, display_name, avatar_url, presence, is_bot, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+		INSERT INTO users (id, workspace_id, name, display_name, avatar_url, presence, is_bot, is_external, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(id) DO UPDATE SET
 			name=excluded.name,
 			display_name=excluded.display_name,
 			avatar_url=excluded.avatar_url,
 			presence=excluded.presence,
 			is_bot=excluded.is_bot,
+			is_external=excluded.is_external,
 			updated_at=excluded.updated_at
-	`, u.ID, u.WorkspaceID, u.Name, u.DisplayName, u.AvatarURL, u.Presence, u.IsBot, u.UpdatedAt)
+	`, u.ID, u.WorkspaceID, u.Name, u.DisplayName, u.AvatarURL, u.Presence, u.IsBot, u.IsExternal, u.UpdatedAt)
 	if err != nil {
 		return fmt.Errorf("upserting user: %w", err)
 	}
@@ -38,9 +43,9 @@ func (db *DB) UpsertUser(u User) error {
 func (db *DB) GetUser(id string) (User, error) {
 	var u User
 	err := db.conn.QueryRow(`
-		SELECT id, workspace_id, name, display_name, avatar_url, presence, is_bot, updated_at
+		SELECT id, workspace_id, name, display_name, avatar_url, presence, is_bot, is_external, updated_at
 		FROM users WHERE id = ?
-	`, id).Scan(&u.ID, &u.WorkspaceID, &u.Name, &u.DisplayName, &u.AvatarURL, &u.Presence, &u.IsBot, &u.UpdatedAt)
+	`, id).Scan(&u.ID, &u.WorkspaceID, &u.Name, &u.DisplayName, &u.AvatarURL, &u.Presence, &u.IsBot, &u.IsExternal, &u.UpdatedAt)
 	if err != nil {
 		return u, fmt.Errorf("getting user: %w", err)
 	}
@@ -49,7 +54,7 @@ func (db *DB) GetUser(id string) (User, error) {
 
 func (db *DB) ListUsers(workspaceID string) ([]User, error) {
 	rows, err := db.conn.Query(`
-		SELECT id, workspace_id, name, display_name, avatar_url, presence, is_bot, updated_at
+		SELECT id, workspace_id, name, display_name, avatar_url, presence, is_bot, is_external, updated_at
 		FROM users WHERE workspace_id = ? ORDER BY display_name, name
 	`, workspaceID)
 	if err != nil {
@@ -60,7 +65,7 @@ func (db *DB) ListUsers(workspaceID string) ([]User, error) {
 	var users []User
 	for rows.Next() {
 		var u User
-		if err := rows.Scan(&u.ID, &u.WorkspaceID, &u.Name, &u.DisplayName, &u.AvatarURL, &u.Presence, &u.IsBot, &u.UpdatedAt); err != nil {
+		if err := rows.Scan(&u.ID, &u.WorkspaceID, &u.Name, &u.DisplayName, &u.AvatarURL, &u.Presence, &u.IsBot, &u.IsExternal, &u.UpdatedAt); err != nil {
 			return nil, fmt.Errorf("scanning user: %w", err)
 		}
 		users = append(users, u)

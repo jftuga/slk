@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -3863,6 +3864,23 @@ func TestUserResolvedMsg_DropsForOtherWorkspace(t *testing.T) {
 	}
 }
 
+func TestUserExternalMsgFlagsPickerEntry(t *testing.T) {
+	app := NewApp()
+	app.activeTeamID = "T1"
+	app.activeChannelID = "C1"
+	app.compose.SetActiveChannel("C1")
+	app.threadCompose.SetActiveChannel("C1")
+	app.SetUserNames(map[string]string{"U1": "alice"})
+
+	_, _ = app.Update(UserExternalMsg{UserID: "U1", IsExternal: true})
+
+	for _, u := range app.compose.MentionUsers() {
+		if u.ID == "U1" && !u.IsExternal {
+			t.Error("U1 should be marked IsExternal after UserExternalMsg")
+		}
+	}
+}
+
 // drainAllCmds recursively executes every cmd inside the tea.BatchMsg
 // tree returned by Update. Used to surface counter side-effects on
 // closure-bound fakes (channelFetcher, channelReadMarker). The
@@ -3986,5 +4004,149 @@ func TestChannelSelected_UnknownFreshnessWithCache_FallsToTier2(t *testing.T) {
 	}
 	if fetchCalled != 1 {
 		t.Errorf("unknown freshness with cache: fetcher should fire once; got %d", fetchCalled)
+	}
+}
+
+func TestSetChannelMembershipForwardsToCompose(t *testing.T) {
+	app := NewApp()
+	app.activeTeamID = "T1"
+	app.activeChannelID = "C1"
+	app.compose.SetActiveChannel("C1")
+	app.threadCompose.SetActiveChannel("C1")
+	app.SetUserNames(map[string]string{"U1": "alice", "U2": "bob"})
+
+	app.SetChannelMembership("C1", []string{"U1"})
+
+	users := app.compose.MentionUsers()
+	byName := map[string]bool{}
+	for _, u := range users {
+		byName[u.DisplayName] = u.InChannel
+	}
+	if !byName["alice"] {
+		t.Error("alice should be in-channel")
+	}
+	if byName["bob"] {
+		t.Error("bob should be not-in-channel")
+	}
+}
+
+func TestSetExternalUsersPropagates(t *testing.T) {
+	app := NewApp()
+	app.activeTeamID = "T1"
+	app.SetExternalUsers(map[string]bool{"U_EXT": true})
+	app.SetUserNames(map[string]string{"U_EXT": "ext.user", "U1": "alice"})
+	app.activeChannelID = "C1"
+	app.compose.SetActiveChannel("C1")
+	app.threadCompose.SetActiveChannel("C1")
+	app.SetChannelMembership("C1", []string{"U_EXT", "U1"})
+
+	found := false
+	for _, u := range app.compose.MentionUsers() {
+		if u.ID == "U_EXT" {
+			found = true
+			if !u.IsExternal {
+				t.Error("U_EXT should be flagged IsExternal")
+			}
+		}
+	}
+	if !found {
+		t.Error("U_EXT missing from picker users")
+	}
+}
+
+func TestChannelMembershipMsgUpdatesPicker(t *testing.T) {
+	app := NewApp()
+	app.activeTeamID = "T1"
+	app.activeChannelID = "C1"
+	app.compose.SetActiveChannel("C1")
+	app.threadCompose.SetActiveChannel("C1")
+	app.SetUserNames(map[string]string{"U1": "alice", "U2": "bob"})
+
+	_, _ = app.Update(ChannelMembershipMsg{ChannelID: "C1", MemberIDs: []string{"U1"}})
+
+	var aliceInCh, bobInCh bool
+	for _, u := range app.compose.MentionUsers() {
+		if u.ID == "U1" {
+			aliceInCh = u.InChannel
+		}
+		if u.ID == "U2" {
+			bobInCh = u.InChannel
+		}
+	}
+	if !aliceInCh {
+		t.Error("alice should be in-channel after ChannelMembershipMsg")
+	}
+	if bobInCh {
+		t.Error("bob should be not-in-channel after ChannelMembershipMsg")
+	}
+}
+
+func TestChannelSelectedInvokesMembershipFetcher(t *testing.T) {
+	app := NewApp()
+	app.activeTeamID = "T1"
+	// The App invokes the fetcher on a goroutine (see ChannelSelectedMsg
+	// handler in app.go), so use a thread-safe record + a done signal.
+	var mu sync.Mutex
+	var fetched []string
+	done := make(chan struct{}, 1)
+	app.SetChannelMembershipFetcher(func(channelID string) {
+		mu.Lock()
+		fetched = append(fetched, channelID)
+		mu.Unlock()
+		done <- struct{}{}
+	})
+
+	_, _ = app.Update(ChannelSelectedMsg{ID: "C42", Name: "general", Type: "channel"})
+
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("fetcher was not invoked within 1s")
+	}
+
+	mu.Lock()
+	got := append([]string(nil), fetched...)
+	mu.Unlock()
+	if len(got) != 1 || got[0] != "C42" {
+		t.Errorf("fetcher invoked with %v, want [C42]", got)
+	}
+	if app.compose.ActiveChannel() != "C42" {
+		t.Errorf("compose active channel = %q, want C42", app.compose.ActiveChannel())
+	}
+}
+
+// TestChannelSelectedReturnsPromptlyEvenIfFetcherBlocks guards against
+// the deadlock that froze the app on first run: the fetcher closure
+// in main.go originally called Membership.EnsureFresh synchronously,
+// which transitively invoked bubbletea's Program.Send (unbuffered
+// channel in bubbletea v2) from inside the Update goroutine — Send
+// blocked waiting for itself to receive. The contract is now that
+// the fetcher must NOT block; the test simulates a misbehaving
+// fetcher that blocks until released, and asserts Update still
+// returns within a short deadline. If a future maintainer changes
+// the wiring to once-again call a blocking fetcher synchronously,
+// this test fails the deadline.
+func TestChannelSelectedReturnsPromptlyEvenIfFetcherBlocks(t *testing.T) {
+	app := NewApp()
+	app.activeTeamID = "T1"
+	release := make(chan struct{})
+	app.SetChannelMembershipFetcher(func(channelID string) {
+		// Simulate a slow fetcher (e.g., blocked on a network call
+		// or a blocking p.Send). Releases when the test allows.
+		<-release
+	})
+	defer close(release)
+
+	done := make(chan struct{})
+	go func() {
+		_, _ = app.Update(ChannelSelectedMsg{ID: "C42", Name: "general", Type: "channel"})
+		close(done)
+	}()
+	select {
+	case <-done:
+		// Update returned promptly — fetcher was not invoked
+		// synchronously on the caller's goroutine.
+	case <-time.After(100 * time.Millisecond):
+		t.Fatal("Update did not return within 100ms; fetcher is being called synchronously on the Update goroutine — risks bubbletea Send-from-Update deadlock")
 	}
 }

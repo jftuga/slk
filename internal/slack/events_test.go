@@ -42,10 +42,18 @@ type mockEventHandler struct {
 	sectionChannelsRemoved        []string
 
 	prefChanges []prefChangeRecord
+
+	memberJoined []memberEventRecord
+	memberLeft   []memberEventRecord
 }
 
 type prefChangeRecord struct {
 	name, value string
+}
+
+type memberEventRecord struct {
+	channelID string
+	userID    string
 }
 
 type channelMarkRecord struct {
@@ -128,6 +136,13 @@ func (m *mockEventHandler) OnChannelSectionChannelsRemoved(sectionID string, cha
 }
 func (m *mockEventHandler) OnPrefChange(name, value string) {
 	m.prefChanges = append(m.prefChanges, prefChangeRecord{name, value})
+}
+
+func (m *mockEventHandler) OnMemberJoined(channelID, userID string) {
+	m.memberJoined = append(m.memberJoined, memberEventRecord{channelID, userID})
+}
+func (m *mockEventHandler) OnMemberLeft(channelID, userID string) {
+	m.memberLeft = append(m.memberLeft, memberEventRecord{channelID, userID})
 }
 
 func TestEventHandlerInterface(t *testing.T) {
@@ -623,5 +638,31 @@ func TestDispatch_PrefChange_EmptyValue(t *testing.T) {
 	}
 	if h.prefChanges[0].value != "" {
 		t.Errorf("value = %q, want empty", h.prefChanges[0].value)
+	}
+}
+
+func TestDispatchMemberJoinedChannel(t *testing.T) {
+	handler := &mockEventHandler{}
+	data := []byte(`{"type":"member_joined_channel","channel":"C1","user":"U_NEW","team":"T1"}`)
+	dispatchWebSocketEvent(data, handler)
+	if len(handler.memberJoined) != 1 {
+		t.Fatalf("expected 1 join, got %d", len(handler.memberJoined))
+	}
+	rec := handler.memberJoined[0]
+	if rec.channelID != "C1" || rec.userID != "U_NEW" {
+		t.Errorf("got %+v, want {C1 U_NEW}", rec)
+	}
+}
+
+func TestDispatchMemberLeftChannel(t *testing.T) {
+	handler := &mockEventHandler{}
+	data := []byte(`{"type":"member_left_channel","channel":"C1","user":"U_GONE","team":"T1"}`)
+	dispatchWebSocketEvent(data, handler)
+	if len(handler.memberLeft) != 1 {
+		t.Fatalf("expected 1 leave, got %d", len(handler.memberLeft))
+	}
+	rec := handler.memberLeft[0]
+	if rec.channelID != "C1" || rec.userID != "U_GONE" {
+		t.Errorf("got %+v, want {C1 U_GONE}", rec)
 	}
 }

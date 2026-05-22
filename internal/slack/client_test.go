@@ -8,8 +8,10 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/gammons/slk/internal/slackhttp"
 	"github.com/gorilla/websocket"
@@ -133,18 +135,19 @@ func TestSendMessage_EmptyTextSendsNoBlocks(t *testing.T) {
 // mockSlackAPI implements SlackAPI for testing.
 // Function fields allow tests to override default behavior.
 type mockSlackAPI struct {
-	authTestFn               func() (*slack.AuthTestResponse, error)
-	getConversationHistoryFn func(params *slack.GetConversationHistoryParameters) (*slack.GetConversationHistoryResponse, error)
-	getConversationRepliesFn func(params *slack.GetConversationRepliesParameters) ([]slack.Message, bool, string, error)
-	getEmojiFn               func() (map[string]string, error)
-	getPermalinkContextFn    func(ctx context.Context, params *slack.PermalinkParameters) (string, error)
-	setUserPresenceContextFn func(ctx context.Context, presence string) error
-	getUserPresenceContextFn func(ctx context.Context, user string) (*slack.UserPresence, error)
-	setSnoozeContextFn       func(ctx context.Context, minutes int) (*slack.DNDStatus, error)
-	endSnoozeContextFn       func(ctx context.Context) (*slack.DNDStatus, error)
-	endDNDContextFn          func(ctx context.Context) error
-	getDNDInfoContextFn      func(ctx context.Context, user *string, options ...slack.ParamOption) (*slack.DNDStatus, error)
-	uploadFileContextFn      func(ctx context.Context, params slack.UploadFileParameters) (*slack.FileSummary, error)
+	authTestFn                      func() (*slack.AuthTestResponse, error)
+	getConversationHistoryFn        func(params *slack.GetConversationHistoryParameters) (*slack.GetConversationHistoryResponse, error)
+	getConversationRepliesFn        func(params *slack.GetConversationRepliesParameters) ([]slack.Message, bool, string, error)
+	getEmojiFn                      func() (map[string]string, error)
+	getPermalinkContextFn           func(ctx context.Context, params *slack.PermalinkParameters) (string, error)
+	setUserPresenceContextFn        func(ctx context.Context, presence string) error
+	getUserPresenceContextFn        func(ctx context.Context, user string) (*slack.UserPresence, error)
+	setSnoozeContextFn              func(ctx context.Context, minutes int) (*slack.DNDStatus, error)
+	endSnoozeContextFn              func(ctx context.Context) (*slack.DNDStatus, error)
+	endDNDContextFn                 func(ctx context.Context) error
+	getDNDInfoContextFn             func(ctx context.Context, user *string, options ...slack.ParamOption) (*slack.DNDStatus, error)
+	uploadFileContextFn             func(ctx context.Context, params slack.UploadFileParameters) (*slack.FileSummary, error)
+	getUsersInConversationContextFn func(ctx context.Context, params *slack.GetUsersInConversationParameters) ([]string, string, error)
 }
 
 func (m *mockSlackAPI) GetConversations(params *slack.GetConversationsParameters) ([]slack.Channel, string, error) {
@@ -272,6 +275,13 @@ func (m *mockSlackAPI) UploadFileContext(ctx context.Context, params slack.Uploa
 		return m.uploadFileContextFn(ctx, params)
 	}
 	return &slack.FileSummary{}, nil
+}
+
+func (m *mockSlackAPI) GetUsersInConversationContext(ctx context.Context, params *slack.GetUsersInConversationParameters) ([]string, string, error) {
+	if m.getUsersInConversationContextFn != nil {
+		return m.getUsersInConversationContextFn(ctx, params)
+	}
+	return nil, "", nil
 }
 
 func TestUploadFile_Success(t *testing.T) {
@@ -2000,5 +2010,103 @@ func TestStartWebSocket_SendsBrowserHeaders(t *testing.T) {
 	}
 	if got := gotHeaders.Get("Sec-Fetch-Dest"); got != "websocket" {
 		t.Errorf("upgrade Sec-Fetch-Dest = %q; want websocket", got)
+	}
+}
+
+func TestGetUsersInConversationPaginates(t *testing.T) {
+	type page struct {
+		users []string
+		next  string
+	}
+	pages := map[string]page{
+		"":        {users: []string{"U1", "U2"}, next: "cursor2"},
+		"cursor2": {users: []string{"U3"}, next: ""},
+	}
+	var seenChannel string
+	var seenLimits []int
+	mock := &mockSlackAPI{
+		getUsersInConversationContextFn: func(ctx context.Context, params *slack.GetUsersInConversationParameters) ([]string, string, error) {
+			seenChannel = params.ChannelID
+			seenLimits = append(seenLimits, params.Limit)
+			p, ok := pages[params.Cursor]
+			if !ok {
+				t.Fatalf("unexpected cursor %q", params.Cursor)
+			}
+			return p.users, p.next, nil
+		},
+	}
+	c := &Client{api: mock}
+
+	got, err := c.GetUsersInConversation(context.Background(), "C1")
+	if err != nil {
+		t.Fatalf("GetUsersInConversation: %v", err)
+	}
+	want := []string{"U1", "U2", "U3"}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("got %v, want %v", got, want)
+	}
+	if seenChannel != "C1" {
+		t.Errorf("ChannelID = %q, want %q", seenChannel, "C1")
+	}
+	if len(seenLimits) != 2 {
+		t.Fatalf("expected 2 API calls, got %d", len(seenLimits))
+	}
+	for i, lim := range seenLimits {
+		if lim != 1000 {
+			t.Errorf("call[%d].Limit = %d, want 1000", i, lim)
+		}
+	}
+}
+
+func TestGetUsersInConversationPropagatesError(t *testing.T) {
+	wantErr := errors.New("channel_not_found")
+	mock := &mockSlackAPI{
+		getUsersInConversationContextFn: func(ctx context.Context, params *slack.GetUsersInConversationParameters) ([]string, string, error) {
+			return nil, "", wantErr
+		},
+	}
+	c := &Client{api: mock}
+
+	_, err := c.GetUsersInConversation(context.Background(), "C1")
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+	if !errors.Is(err, wantErr) {
+		t.Errorf("expected wrapped wantErr, got %v", err)
+	}
+	if !strings.Contains(err.Error(), "listing conversation members") {
+		t.Errorf("expected 'listing conversation members' prefix, got %q", err.Error())
+	}
+}
+
+func TestGetUsersInConversationRetriesOnRateLimit(t *testing.T) {
+	var calls int
+	var seenCursors []string
+	mock := &mockSlackAPI{
+		getUsersInConversationContextFn: func(ctx context.Context, params *slack.GetUsersInConversationParameters) ([]string, string, error) {
+			calls++
+			seenCursors = append(seenCursors, params.Cursor)
+			if calls == 1 {
+				return nil, "", &slack.RateLimitedError{RetryAfter: 10 * time.Millisecond}
+			}
+			return []string{"U1", "U2"}, "", nil
+		},
+	}
+	c := &Client{api: mock}
+
+	got, err := c.GetUsersInConversation(context.Background(), "C1")
+	if err != nil {
+		t.Fatalf("GetUsersInConversation: %v", err)
+	}
+	want := []string{"U1", "U2"}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("got %v, want %v", got, want)
+	}
+	if calls != 2 {
+		t.Fatalf("expected 2 API calls (1 rate-limited + 1 retry), got %d", calls)
+	}
+	// On rate-limit, cursor must NOT advance — the retry hits the same page.
+	if seenCursors[0] != "" || seenCursors[1] != "" {
+		t.Errorf("expected both calls with empty cursor (same page retry), got %v", seenCursors)
 	}
 }

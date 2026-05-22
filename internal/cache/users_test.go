@@ -32,6 +32,46 @@ func TestUpsertAndGetUser(t *testing.T) {
 	}
 }
 
+func TestUpsertUserPreservesIsExternal(t *testing.T) {
+	db := setupDBWithWorkspace(t)
+	defer db.Close()
+
+	u := User{
+		ID:          "U_EXT",
+		WorkspaceID: "T1",
+		Name:        "ext.user",
+		DisplayName: "External User",
+		IsExternal:  true,
+	}
+	if err := db.UpsertUser(u); err != nil {
+		t.Fatal(err)
+	}
+	got, err := db.GetUser("U_EXT")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !got.IsExternal {
+		t.Errorf("IsExternal not persisted: got %+v", got)
+	}
+}
+
+func TestUpsertUserDefaultsIsExternalFalse(t *testing.T) {
+	db := setupDBWithWorkspace(t)
+	defer db.Close()
+
+	u := User{ID: "U_INT", WorkspaceID: "T1", Name: "int.user", DisplayName: "Internal"}
+	if err := db.UpsertUser(u); err != nil {
+		t.Fatal(err)
+	}
+	got, err := db.GetUser("U_INT")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.IsExternal {
+		t.Errorf("IsExternal should default to false; got %+v", got)
+	}
+}
+
 func TestUpdatePresence(t *testing.T) {
 	db := setupDBWithWorkspace(t)
 	defer db.Close()

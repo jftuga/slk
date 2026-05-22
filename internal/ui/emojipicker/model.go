@@ -11,7 +11,8 @@ import (
 	"github.com/gammons/slk/internal/ui/styles"
 )
 
-// MaxVisible matches mentionpicker.MaxVisible for UX symmetry.
+// MaxVisible caps how many emoji rows are shown in the picker.
+// Independent of mentionpicker.MaxVisible.
 const MaxVisible = 5
 
 type Model struct {

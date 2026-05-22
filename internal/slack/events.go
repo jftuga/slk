@@ -77,6 +77,15 @@ type EventHandler interface {
 	// value as a string — for list-shaped prefs like muted_channels,
 	// Slack ships the full updated list, comma-separated.
 	OnPrefChange(name, value string)
+
+	// OnMemberJoined is delivered for member_joined_channel WS events:
+	// a user joined the conversation. For shared channels this includes
+	// external (Slack Connect) users. The receiver should persist the
+	// membership and trigger external-user resolution if the user is unknown.
+	OnMemberJoined(channelID, userID string)
+
+	// OnMemberLeft is delivered for member_left_channel WS events.
+	OnMemberLeft(channelID, userID string)
 }
 
 // wsEvent is the minimal structure for identifying a WebSocket event type.
@@ -136,6 +145,15 @@ type wsTypingEvent struct {
 	Type    string `json:"type"`
 	Channel string `json:"channel"`
 	User    string `json:"user"`
+}
+
+// wsMemberChannelEvent represents member_joined_channel /
+// member_left_channel. Both events share the same shape.
+type wsMemberChannelEvent struct {
+	Type    string `json:"type"`
+	Channel string `json:"channel"`
+	User    string `json:"user"`
+	Team    string `json:"team"`
 }
 
 // wsManualPresenceEvent represents a manual_presence_change event,
@@ -379,6 +397,22 @@ func dispatchWebSocketEvent(data []byte, handler EventHandler) {
 			return
 		}
 		handler.OnUserTyping(evt.Channel, evt.User)
+
+	case "member_joined_channel":
+		var evt wsMemberChannelEvent
+		if err := json.Unmarshal(data, &evt); err != nil {
+			return
+		}
+		debuglog.WS("member_joined_channel: channel=%s user=%s", evt.Channel, evt.User)
+		handler.OnMemberJoined(evt.Channel, evt.User)
+
+	case "member_left_channel":
+		var evt wsMemberChannelEvent
+		if err := json.Unmarshal(data, &evt); err != nil {
+			return
+		}
+		debuglog.WS("member_left_channel: channel=%s user=%s", evt.Channel, evt.User)
+		handler.OnMemberLeft(evt.Channel, evt.User)
 
 	case "channel_section_upserted":
 		var raw wsChannelSectionUpserted

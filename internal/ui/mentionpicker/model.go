@@ -2,6 +2,7 @@ package mentionpicker
 
 import (
 	"fmt"
+	"sort"
 	"strings"
 
 	"charm.land/lipgloss/v2"
@@ -9,12 +10,26 @@ import (
 	"github.com/gammons/slk/internal/ui/styles"
 )
 
-const MaxVisible = 5
+const MaxVisible = 7
 
 type User struct {
 	ID          string
 	DisplayName string
 	Username    string
+	// InChannel indicates whether the user is a member of the active
+	// channel. False sorts the user into the not-in-channel tier (below
+	// in-channel users in the picker). The caller is responsible for
+	// populating this field. Special mentions (@here / @channel /
+	// @everyone) always have InChannel=true. For workspace users, the
+	// compose layer computes the value from the active channel's member
+	// set (see compose.rebuildMentionUsers); when no membership data
+	// has been loaded yet, compose defaults it to true to preserve the
+	// pre-channel-aware behavior.
+	InChannel bool
+	// IsExternal indicates a Slack Connect / shared-channel guest
+	// whose home team_id differs from the workspace TeamID. Drives
+	// the "(ext)" suffix in the picker.
+	IsExternal bool
 }
 
 type MentionResult struct {
@@ -23,9 +38,9 @@ type MentionResult struct {
 }
 
 var specialMentions = []User{
-	{ID: "special:here", DisplayName: "here", Username: "here"},
-	{ID: "special:channel", DisplayName: "channel", Username: "channel"},
-	{ID: "special:everyone", DisplayName: "everyone", Username: "everyone"},
+	{ID: "special:here", DisplayName: "here", Username: "here", InChannel: true},
+	{ID: "special:channel", DisplayName: "channel", Username: "channel", InChannel: true},
+	{ID: "special:everyone", DisplayName: "everyone", Username: "everyone", InChannel: true},
 }
 
 type Model struct {
@@ -42,6 +57,12 @@ func New() Model {
 
 func (m *Model) SetUsers(users []User) {
 	m.users = users
+}
+
+// Users returns the user list most recently set via SetUsers.
+// Used by tests; not part of the picker's input API.
+func (m *Model) Users() []User {
+	return m.users
 }
 
 func (m *Model) Open() {
@@ -108,26 +129,46 @@ func (m *Model) Select() *MentionResult {
 
 func (m *Model) filter() {
 	q := text.Fold(m.query)
-	var results []User
+	matches := func(u User) bool {
+		if q == "" {
+			return true
+		}
+		return strings.HasPrefix(text.Fold(u.DisplayName), q) ||
+			strings.HasPrefix(text.Fold(u.Username), q)
+	}
 
-	// Special mentions first
+	var specials, inCh, notInCh []User
 	for _, u := range specialMentions {
-		if q == "" || strings.HasPrefix(text.Fold(u.DisplayName), q) || strings.HasPrefix(text.Fold(u.Username), q) {
-			results = append(results, u)
+		if matches(u) {
+			specials = append(specials, u)
+		}
+	}
+	for _, u := range m.users {
+		if !matches(u) {
+			continue
+		}
+		if u.InChannel {
+			inCh = append(inCh, u)
+		} else {
+			notInCh = append(notInCh, u)
 		}
 	}
 
-	// Then regular users
-	for _, u := range m.users {
-		if q == "" || strings.HasPrefix(text.Fold(u.DisplayName), q) || strings.HasPrefix(text.Fold(u.Username), q) {
-			results = append(results, u)
-		}
-	}
+	sort.Slice(inCh, func(i, j int) bool {
+		return inCh[i].DisplayName < inCh[j].DisplayName
+	})
+	sort.Slice(notInCh, func(i, j int) bool {
+		return notInCh[i].DisplayName < notInCh[j].DisplayName
+	})
+
+	results := make([]User, 0, len(specials)+len(inCh)+len(notInCh))
+	results = append(results, specials...)
+	results = append(results, inCh...)
+	results = append(results, notInCh...)
 
 	if len(results) > MaxVisible {
 		results = results[:MaxVisible]
 	}
-
 	m.filtered = results
 }
 
@@ -138,15 +179,46 @@ func (m *Model) View(width int) string {
 
 	var rows []string
 	for i, u := range m.filtered {
+		selected := i == m.selected
+
 		indicator := "  "
-		nameStyle := lipgloss.NewStyle().Foreground(styles.TextPrimary)
-		if i == m.selected {
+		if selected {
 			indicator = lipgloss.NewStyle().Foreground(styles.Accent).Render("▌ ")
+		}
+
+		// Name color: muted for not-in-channel rows at rest;
+		// upgraded to TextPrimary when selected (per spec).
+		nameColor := styles.TextPrimary
+		if !u.InChannel && !selected {
+			nameColor = styles.TextMuted
+		}
+		nameStyle := lipgloss.NewStyle().Foreground(nameColor)
+		if selected {
 			nameStyle = nameStyle.Bold(true)
 		}
 
-		label := fmt.Sprintf("%s (%s)", u.DisplayName, u.Username)
+		// Special mentions keep "(Username)" in TextPrimary (the
+		// historical, intentional behavior). Regular users get no
+		// parenthetical here (the dead empty-parens fix).
+		label := u.DisplayName
+		if u.Username != "" {
+			label = fmt.Sprintf("%s (%s)", u.DisplayName, u.Username)
+		}
+
 		row := indicator + nameStyle.Render(label)
+
+		// Suffix in TextMuted, always (even when row is selected).
+		var suffix string
+		switch {
+		case !u.InChannel:
+			suffix = " (not in channel)"
+		case u.IsExternal:
+			suffix = " (ext)"
+		}
+		if suffix != "" {
+			row += lipgloss.NewStyle().Foreground(styles.TextMuted).Render(suffix)
+		}
+
 		rows = append(rows, row)
 	}
 
@@ -156,7 +228,7 @@ func (m *Model) View(width int) string {
 		BorderStyle(lipgloss.RoundedBorder()).
 		BorderForeground(styles.Primary).
 		Background(styles.SurfaceDark).
-		Width(width - 2). // account for border
+		Width(width - 2).
 		Render(content)
 
 	return box
