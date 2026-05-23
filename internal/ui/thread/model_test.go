@@ -1,6 +1,7 @@
 package thread
 
 import (
+	"fmt"
 	stdimage "image"
 	"strings"
 	"testing"
@@ -605,5 +606,80 @@ func TestHitTestReaction_NoHitsWithoutReactions(t *testing.T) {
 	}
 	if _, _, ok := m.HitTestReaction(0, 0); ok {
 		t.Error("HitTestReaction with no reactions should always return ok=false")
+	}
+}
+
+// Parent message now lives at the top of the scrollable viewContent (not
+// pinned in chrome). This means: (1) chromeHeight no longer counts the
+// parent rows, (2) the parent shows up in viewContent above the replies,
+// (3) ScrollDown moves the parent out of view, leaving the replies. Pins
+// the issue-#23 follow-up: a long parent must not block the reply area.
+func TestThreadView_ParentScrollsWithReplies(t *testing.T) {
+	m := New()
+	parent := messages.MessageItem{
+		TS:       "1.0",
+		UserName: "alice",
+		// A long parent body that spans multiple wrapped lines.
+		Text:      strings.Repeat("LONGPARENT ", 30),
+		Timestamp: "10:30 AM",
+	}
+	replies := []messages.MessageItem{
+		{TS: "2.0", UserName: "bob", Text: "REPLY_MARKER one", Timestamp: "10:31 AM"},
+		{TS: "3.0", UserName: "carol", Text: "REPLY_MARKER two", Timestamp: "10:32 AM"},
+	}
+	m.SetThread(parent, replies, "C1", "1.0")
+	_ = m.View(40, 60)
+
+	// Chrome is just header + separator now -- exactly 2 visual rows.
+	if m.chromeHeight != 2 {
+		t.Errorf("chromeHeight = %d, want 2 (header + separator only)", m.chromeHeight)
+	}
+
+	// viewContent must start with the parent block (LONGPARENT) BEFORE
+	// the first reply marker. Find the first occurrence of each and
+	// assert ordering inside viewContent.
+	pIdx := strings.Index(m.viewContent, "LONGPARENT")
+	rIdx := strings.Index(m.viewContent, "REPLY_MARKER")
+	if pIdx < 0 {
+		t.Fatal("viewContent missing parent body")
+	}
+	if rIdx < 0 {
+		t.Fatal("viewContent missing reply marker")
+	}
+	if pIdx >= rIdx {
+		t.Errorf("parent (idx %d) must precede first reply (idx %d) in viewContent", pIdx, rIdx)
+	}
+
+	// entryOffsets[0] is now offset by the parent block's height -- not 0
+	// as in the old layout. Defends the math used by snap + reaction-hit
+	// translation + ClickAt.
+	if len(m.entryOffsets) == 0 || m.entryOffsets[0] == 0 {
+		t.Errorf("entryOffsets[0] = %v, want > 0 (parent block precedes first reply)", m.entryOffsets)
+	}
+}
+
+// Thread reply area gets a scrollbar overlay when content exceeds the
+// visible height -- matches the messages-pane convention. Defends the
+// fix for the "replies view has no scrollbar" report.
+func TestThreadView_HasScrollbarWhenOverflowing(t *testing.T) {
+	m := New()
+	parent := messages.MessageItem{TS: "1.0", UserName: "alice", Text: "p"}
+	// Many short replies so the total content easily exceeds a 10-row pane.
+	var replies []messages.MessageItem
+	for i := 0; i < 30; i++ {
+		replies = append(replies, messages.MessageItem{
+			TS:       fmt.Sprintf("%d.0", i+2),
+			UserName: "bob",
+			Text:     fmt.Sprintf("reply %d", i),
+		})
+	}
+	m.SetThread(parent, replies, "C1", "1.0")
+
+	view := m.View(40, 10)
+	// Scrollbar uses '│' (track) and '█' (thumb). With 30 replies in a
+	// 10-row pane, totalLines >> pane height, so scrollbar.Overlay
+	// definitely draws.
+	if !strings.ContainsRune(view, '│') && !strings.ContainsRune(view, '█') {
+		t.Fatalf("expected scrollbar glyph in overflowing thread view; got:\n%s", view)
 	}
 }

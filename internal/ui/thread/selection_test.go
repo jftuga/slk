@@ -20,10 +20,20 @@ func newTestThread() *Model {
 }
 
 // firstContentY returns the smallest pane-local viewportY that lands on
-// reply content (past the chrome — header + separator + parent message
-// + separator). Used by tests rather than hard-coding the chrome height
-// because the parent's render width / wrap can change it.
-func firstContentY(m *Model) int { return m.chromeHeight }
+// reply content. Chrome is now just `header + separator`, and the parent
+// message lives at the top of the scrollable viewContent (it scrolls with
+// replies so a long parent does not block them). m.entryOffsets[0] is the
+// line index of the first reply inside viewContent, which equals the
+// parent block's height. Pane-local row = chromeHeight + entryOffsets[0]
+// minus the viewport's YOffset. Tests start at YOffset=0 (newTestThread
+// calls View once and selection isn't moved), so we don't subtract YOffset
+// here.
+func firstContentY(m *Model) int {
+	if len(m.entryOffsets) == 0 {
+		return m.chromeHeight
+	}
+	return m.chromeHeight + m.entryOffsets[0] - m.vp.YOffset()
+}
 
 func TestThreadSelection_BeginExtendEnd(t *testing.T) {
 	m := newTestThread()
@@ -89,19 +99,24 @@ func TestThreadSelection_ScrollHintForDrag(t *testing.T) {
 	if h < 2 {
 		t.Skip("test height too small")
 	}
-	// A row sitting inside the chrome should be treated as "above the
-	// top edge" so an upward drag continues to auto-scroll.
+	// A row sitting inside the chrome (header / separator) should be
+	// treated as "above the top edge" so an upward drag continues to
+	// auto-scroll. Chrome is now just header+separator -- the parent
+	// message has moved into the scrollable content.
 	if got := m.ScrollHintForDrag(0); got != -1 {
 		t.Errorf("chrome row: want -1 (treated as above top edge) got %d", got)
 	}
-	// First content row is the top edge.
-	if got := m.ScrollHintForDrag(firstContentY(m)); got != -1 {
-		t.Errorf("top: want -1 got %d", got)
+	// The first row of the scrollable area IS the top edge -- this lands
+	// at the start of the parent message block now (parent scrolls).
+	if got := m.ScrollHintForDrag(m.chromeHeight); got != -1 {
+		t.Errorf("top of scrollable: want -1 got %d", got)
 	}
-	if got := m.ScrollHintForDrag(firstContentY(m) + h - 1); got != +1 {
+	// Bottom edge of the reply area.
+	if got := m.ScrollHintForDrag(m.chromeHeight + h - 1); got != +1 {
 		t.Errorf("bottom: want +1 got %d", got)
 	}
-	if got := m.ScrollHintForDrag(firstContentY(m) + h/2); got != 0 {
+	// Middle of the reply area.
+	if got := m.ScrollHintForDrag(m.chromeHeight + h/2); got != 0 {
 		t.Errorf("middle: want 0 got %d", got)
 	}
 }
