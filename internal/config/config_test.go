@@ -149,6 +149,56 @@ func TestConfig_ImageDefaults(t *testing.T) {
 	}
 }
 
+// MouseWheelLines: default is 3, an unset/zero value is coerced to 3 on
+// Load (defends against partial [appearance] blocks), and an explicit
+// positive value passes through.
+func TestConfig_MouseWheelLines(t *testing.T) {
+	// Default value from Default().
+	if d := Default(); d.Appearance.MouseWheelLines != 3 {
+		t.Errorf("Default() mouse_wheel_lines = %d, want 3", d.Appearance.MouseWheelLines)
+	}
+
+	// Missing key in [appearance]: Load should fall back to 3.
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.toml")
+	if err := os.WriteFile(path, []byte("[appearance]\ntheme = \"nord\"\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Appearance.MouseWheelLines != 3 {
+		t.Errorf("missing key: mouse_wheel_lines = %d, want 3", cfg.Appearance.MouseWheelLines)
+	}
+
+	// Explicit override passes through.
+	path2 := filepath.Join(dir, "config2.toml")
+	if err := os.WriteFile(path2, []byte("[appearance]\nmouse_wheel_lines = 7\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	cfg2, err := Load(path2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg2.Appearance.MouseWheelLines != 7 {
+		t.Errorf("override: mouse_wheel_lines = %d, want 7", cfg2.Appearance.MouseWheelLines)
+	}
+
+	// Negative or zero explicit values are clamped to the default 3.
+	path3 := filepath.Join(dir, "config3.toml")
+	if err := os.WriteFile(path3, []byte("[appearance]\nmouse_wheel_lines = -2\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	cfg3, err := Load(path3)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg3.Appearance.MouseWheelLines != 3 {
+		t.Errorf("negative clamp: mouse_wheel_lines = %d, want 3", cfg3.Appearance.MouseWheelLines)
+	}
+}
+
 func TestConfig_ImageOverrides(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "config.toml")

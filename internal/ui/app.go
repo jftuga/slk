@@ -887,6 +887,11 @@ type App struct {
 	typingTickerOn bool
 	typingEnabled  bool
 
+	// mouseWheelLines is the number of lines the viewport scrolls per
+	// mouse-wheel notch. Plumbed from [appearance].mouse_wheel_lines.
+	// Falls back to 3 when unset (matches the pre-config behavior).
+	mouseWheelLines int
+
 	// Outbound typing
 	typingSendFn   TypingSendFunc
 	lastTypingSent time.Time
@@ -1031,6 +1036,7 @@ func NewApp() *App {
 		selfSentTSes:         make(map[string]time.Time),
 		lastSelfSendByChannel: make(map[string]time.Time),
 		threadsDirtyDebounce: 150 * time.Millisecond,
+		mouseWheelLines:      3,
 		userNames:            map[string]string{},
 		externalUsers:        map[string]bool{},
 		statusByTeam:         map[string]workspaceStatus{},
@@ -1144,11 +1150,15 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		default:
 			break
 		}
-		// Lines moved per wheel notch -- matches typical terminal behavior.
-		// Single-row panes (sidebar) still feel fine because real-world
-		// workspace lists are short and the snap-back on the next j/k
-		// restores the previously-selected channel.
-		const wheelLinesPerNotch = 3
+		// Lines moved per wheel notch -- configured via
+		// [appearance].mouse_wheel_lines (default 3, matches typical
+		// terminal behavior). Single-row panes (sidebar) still feel fine
+		// because real-world workspace lists are short and the snap-back
+		// on the next j/k restores the previously-selected channel.
+		wheelLinesPerNotch := a.mouseWheelLines
+		if wheelLinesPerNotch < 1 {
+			wheelLinesPerNotch = 1
+		}
 		x := msg.X
 		switch {
 		case x < a.layoutRailWidth:
@@ -5060,6 +5070,15 @@ func (a *App) SetThemeOverrides(overrides config.Theme) {
 // SetTypingEnabled controls whether typing indicators are shown and sent.
 func (a *App) SetTypingEnabled(enabled bool) {
 	a.typingEnabled = enabled
+}
+
+// SetMouseWheelLines configures the number of lines the viewport scrolls per
+// mouse-wheel notch. Values < 1 are coerced to 1 to guarantee scroll progress.
+func (a *App) SetMouseWheelLines(n int) {
+	if n < 1 {
+		n = 1
+	}
+	a.mouseWheelLines = n
 }
 
 // SetSidebarStaleThreshold configures auto-hiding of inactive

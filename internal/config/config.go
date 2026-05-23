@@ -52,6 +52,10 @@ type Appearance struct {
 	// If 0 or unset, defaults to 60. The image is also bounded by the
 	// available message-pane width when narrower.
 	MaxImageCols int `toml:"max_image_cols"`
+	// MouseWheelLines controls how many lines the viewport scrolls per
+	// mouse-wheel notch. Higher = faster scroll. Defaults to 3 (typical
+	// terminal behavior). Clamped to >= 1 at load time.
+	MouseWheelLines int `toml:"mouse_wheel_lines"`
 }
 
 type Animations struct {
@@ -128,6 +132,7 @@ func Default() Config {
 			ImageProtocol:   "auto",
 			MaxImageRows:    20,
 			MaxImageCols:    60,
+			MouseWheelLines: 3,
 		},
 		Animations: Animations{
 			Enabled:          true,
@@ -172,6 +177,13 @@ func Load(path string) (Config, error) {
 		return cfg, err
 	}
 	cfg.Workspaces = resolved
+
+	// Clamp MouseWheelLines: 0 (unset, after a user supplied a partial
+	// [appearance] block without this key) and negative values both fall
+	// back to the default. >= 1 to guarantee scroll progress per notch.
+	if cfg.Appearance.MouseWheelLines < 1 {
+		cfg.Appearance.MouseWheelLines = 3
+	}
 
 	return cfg, nil
 }
