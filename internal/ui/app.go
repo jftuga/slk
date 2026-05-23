@@ -381,6 +381,7 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		a.presence,
 		a.preview,
 		a.drag,
+		a.typing,
 	); handled {
 		if cmd != nil {
 			cmds = append(cmds, cmd)
@@ -1717,34 +1718,16 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case WorkspaceFailedMsg:
 		a.bootstrap.MarkFailed(msg.TeamName)
 
-	case UserTypingMsg:
-		if !a.typing.Enabled() {
-			return a, nil
-		}
-		a.typing.Add(msg.ChannelID, msg.UserID)
-		if !a.typing.TickerOn() {
-			a.typing.MarkTickerOn()
-			cmds = append(cmds, tea.Tick(time.Second, func(time.Time) tea.Msg {
-				return TypingExpiredMsg{}
-			}))
-		}
-
-	// PresenceChangeMsg, StatusChangeMsg, statusbar.DNDTickMsg moved
-	// to presenceController.Handle (Phase 4a, see reducers.go).
+	// UserTypingMsg, TypingExpiredMsg moved to typingTracker.Handle
+	// (Phase 4d). PresenceChangeMsg, StatusChangeMsg,
+	// statusbar.DNDTickMsg moved to presenceController.Handle
+	// (Phase 4a). See reducers.go.
 
 	case ToastMsg:
 		a.statusbar.SetToast(msg.Text)
 		cmds = append(cmds, tea.Tick(3*time.Second, func(time.Time) tea.Msg {
 			return statusbar.CopiedClearMsg{}
 		}))
-
-	case TypingExpiredMsg:
-		// Continue ticking if there are still active typers
-		if a.typing.Expire() {
-			cmds = append(cmds, tea.Tick(time.Second, func(time.Time) tea.Msg {
-				return TypingExpiredMsg{}
-			}))
-		}
 	}
 
 	return a, tea.Batch(cmds...)

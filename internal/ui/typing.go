@@ -28,7 +28,11 @@
 // every call site.
 package ui
 
-import "time"
+import (
+	"time"
+
+	tea "charm.land/bubbletea/v2"
+)
 
 // typingExpiry is how long a typing indicator from a remote user
 // stays visible after the most recent UserTypingMsg.
@@ -184,6 +188,49 @@ func (b *typingBroadcaster) MaybeSend(channelID string) bool {
 	fn := b.sendFn
 	go fn(channelID)
 	return true
+}
+
+// typingExpiredTickCmd schedules the next TypingExpiredMsg one
+// second out. Used by both the UserTypingMsg arm (kick the chain
+// alive) and TypingExpiredMsg arm (reschedule while typers remain).
+func typingExpiredTickCmd() tea.Cmd {
+	return tea.Tick(time.Second, func(time.Time) tea.Msg {
+		return TypingExpiredMsg{}
+	})
+}
+
+// Handle is the typing-family reducer for App.Update (Phase 4d).
+// Owns UserTypingMsg (record a remote typer + ensure the expiry
+// tick chain is alive) and TypingExpiredMsg (sweep expired entries
+// + maybe reschedule). Returns (nil, false) for any other message
+// type.
+//
+// The outbound throttle (typingBroadcaster.MaybeSend) is invoked
+// from compose/insert-mode handlers, not from Update, so it's not
+// part of this reducer.
+func (t *typingTracker) Handle(a *App, msg tea.Msg) (tea.Cmd, bool) {
+	_ = a
+	switch m := msg.(type) {
+	case UserTypingMsg:
+		if !t.Enabled() {
+			return nil, true
+		}
+		t.Add(m.ChannelID, m.UserID)
+		if t.TickerOn() {
+			return nil, true
+		}
+		t.MarkTickerOn()
+		return typingExpiredTickCmd(), true
+
+	case TypingExpiredMsg:
+		_ = m
+		// Continue ticking if there are still active typers.
+		if !t.Expire() {
+			return nil, true
+		}
+		return typingExpiredTickCmd(), true
+	}
+	return nil, false
 }
 
 // typingIndicatorText formats the user-facing line for the supplied
