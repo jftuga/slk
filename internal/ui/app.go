@@ -909,55 +909,7 @@ func (a *App) handleInsertMode(msg tea.KeyMsg) tea.Cmd {
 
 // handleCommandMode moved to mode_command.go (Phase 5b).
 
-func (a *App) handleChannelFinderMode(msg tea.KeyMsg) tea.Cmd {
-	// Map tea.KeyMsg to string for the finder
-	keyStr := msg.String()
-	switch msg.Key().Code {
-	case tea.KeyEnter:
-		keyStr = "enter"
-	case tea.KeyEscape:
-		keyStr = "esc"
-	case tea.KeyUp:
-		keyStr = "up"
-	case tea.KeyDown:
-		keyStr = "down"
-	case tea.KeyBackspace:
-		keyStr = "backspace"
-	}
-
-	result := a.channelFinder.HandleKey(keyStr)
-	if result != nil {
-		a.channelFinder.Close()
-		a.SetMode(ModeNormal)
-		// Synthetic destinations (e.g. Threads view) live alongside
-		// channels in the finder but route to a view activation rather
-		// than a channel switch.
-		if result.Type == "threads" {
-			return func() tea.Msg { return ThreadsViewActivatedMsg{} }
-		}
-		// Already-joined: switch immediately. Not joined: kick off a join
-		// command; ChannelJoinedMsg will fold the channel into the sidebar
-		// and switch to it.
-		if result.Joined {
-			a.sidebar.SelectByID(result.ID)
-			return func() tea.Msg {
-				return ChannelSelectedMsg{ID: result.ID, Name: result.Name, Type: result.Type}
-			}
-		}
-		channels := a.channels
-		id, name := result.ID, result.Name
-		return func() tea.Msg {
-			return channels.Join(id, name)
-		}
-	}
-
-	// Check if finder closed itself (Esc)
-	if !a.channelFinder.IsVisible() {
-		a.SetMode(ModeNormal)
-	}
-
-	return nil
-}
+// handleChannelFinderMode moved to mode_channel_finder.go (Phase 5h).
 
 // handleWorkspaceFinderMode moved to mode_workspace_finder.go (Phase 5e).
 

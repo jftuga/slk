@@ -51,7 +51,7 @@ var modeHandlers = map[Mode]modeHandler{
 	ModeNormal:               (*App).handleNormalMode,
 	ModeInsert:               (*App).handleInsertMode,
 	ModeCommand:              handleCommandMode,
-	ModeChannelFinder:        (*App).handleChannelFinderMode,
+	ModeChannelFinder:        handleChannelFinderMode,
 	ModeReactionPicker:       (*App).handleReactionPickerMode,
 	ModeConfirm:              (*App).handleConfirmMode,
 	ModeWorkspaceFinder:      handleWorkspaceFinderMode,
