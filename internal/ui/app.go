@@ -379,6 +379,7 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	// the trace predictable.
 	if cmd, handled := dispatchReducers(a, msg,
 		a.presence,
+		a.preview,
 	); handled {
 		if cmd != nil {
 			cmds = append(cmds, cmd)
@@ -1070,64 +1071,9 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// permanently-failed image isn't re-attempted from the thread.
 		a.threadPanel.HandleImageFailed(msg.Key)
 
-	case messages.OpenImagePreviewMsg:
-		// Open the overlay IMMEDIATELY in a loading state so the user
-		// gets visual feedback that their click / O / v registered.
-		// The actual image fetch happens asynchronously; previewLoadedMsg
-		// swaps the bytes in when ready. Without this fast path the UI
-		// felt hung on slow-fetching previews (Slack Connect channels
-		// where multi-auth retry can take seconds).
-		if cmd := a.openImagePreviewCmd(msg.Channel, msg.TS, msg.AttIdx); cmd != nil {
-			name, sibCount, sibIndex := a.previewMetaForOpen(msg.Channel, msg.TS, msg.AttIdx)
-			loading := imgpkg.NewLoadingPreview(name, sibCount, sibIndex)
-			a.preview.Open(&loading, msg.Channel, msg.TS, msg.AttIdx)
-			cmds = append(cmds, cmd, previewSpinnerTickCmd())
-		}
-
-	case previewSpinnerTickMsg:
-		if a.preview.Active() && a.preview.Overlay().IsLoading() {
-			a.preview.Overlay().AdvanceLoadingFrame()
-			cmds = append(cmds, previewSpinnerTickCmd())
-		}
-
-	case previewLoadedMsg:
-		input := imgpkg.PreviewInput{
-			Name:         msg.Name,
-			FileID:       msg.FileID,
-			Img:          msg.Img,
-			Path:         msg.Path,
-			SiblingCount: msg.SiblingCount,
-			SiblingIndex: msg.SiblingIndex,
-		}
-		// If the overlay is nil or already closed, the user dismissed
-		// it before the bytes arrived; drop the image on the floor.
-		if a.preview.Active() {
-			// Swap bytes into the existing overlay (whether it's the
-			// initial loading shell or an already-displayed image
-			// being cycled). This preserves the overlay layout and
-			// keeps cycling state coherent.
-			a.preview.Overlay().SwapImage(input)
-			if msg.isCycle {
-				// Cycling case: update the remembered attIdx so a
-				// subsequent cycle key starts from the new position.
-				if msgItem, ok := a.findMessageInActiveChannel(a.preview.Channel(), a.preview.TS()); ok {
-					for i, att := range msgItem.Attachments {
-						if att.FileID == msg.FileID {
-							a.preview.SetAttIdx(i)
-							break
-						}
-					}
-				}
-			}
-		}
-
-	case previewErrorMsg:
-		log.Printf("preview fetch error: %v", msg.Err)
-		// Dismiss the loading overlay so the user isn't left staring at
-		// a permanent spinner.
-		if a.preview.Overlay() != nil && a.preview.Overlay().IsLoading() {
-			a.preview.Close()
-		}
+	// messages.OpenImagePreviewMsg, previewSpinnerTickMsg,
+	// previewLoadedMsg, previewErrorMsg moved to
+	// imagePreviewController.Handle (Phase 4b, see reducers.go).
 
 	case NewMessageMsg:
 		debuglog.Cache("NewMessageMsg: channel=%s ts=%s thread_ts=%s active=%s",
