@@ -44,6 +44,15 @@ type ChannelItem struct {
 	IsMuted bool
 }
 
+// IsVisiblyUnread reports whether this channel should render as having
+// unread messages -- DB-level HasUnread AND the user hasn't muted it.
+// This is the single source of truth for the "unread dot" predicate;
+// both the sidebar View, section aggregates, and the App's tab-title
+// counter MUST consult this helper rather than re-deriving the rule.
+func (item ChannelItem) IsVisiblyUnread(state cache.ReadState) bool {
+	return state.HasUnread && !item.IsMuted
+}
+
 // sectionFor is the package-level back-compat shim for callers
 // (including tests) that don't have a *Model. It always uses
 // config-mode logic. The Slack-mode dispatcher is *Model.sectionFor.
@@ -275,6 +284,25 @@ func (m *Model) SetReadStateReader(f func() map[string]cache.ReadState) {
 	m.readStateReader = f
 	m.cacheValid = false
 	m.dirty()
+}
+
+// UnreadChannelCount returns the number of channels currently in the
+// sidebar that should render as unread (HasUnread && !IsMuted), via
+// ChannelItem.IsVisiblyUnread. Returns 0 when no reader is installed.
+// Used by the App to compute the window title's active-workspace
+// count -- guaranteed to match the dot population exactly.
+func (m *Model) UnreadChannelCount() int {
+	if m.readStateReader == nil {
+		return 0
+	}
+	state := m.readStateReader()
+	count := 0
+	for _, item := range m.items {
+		if item.IsVisiblyUnread(state[item.ID]) {
+			count++
+		}
+	}
+	return count
 }
 
 // Invalidate forces the next View() call to re-read read state from
@@ -948,13 +976,10 @@ func (m *Model) aggregateUnreadForSection(section string) int {
 	total := 0
 	for _, idx := range m.filtered {
 		item := m.items[idx]
-		if item.IsMuted {
-			continue
-		}
 		if m.sectionFor(item) != section {
 			continue
 		}
-		if readState[item.ID].HasUnread {
+		if item.IsVisiblyUnread(readState[item.ID]) {
 			total++
 		}
 	}
@@ -1141,8 +1166,9 @@ func (m *Model) buildCache(width int) {
 		// pop, even when they have new messages — Slack's contract is
 		// "muted = no notification surface". The dimmer ChannelMuted
 		// style below distinguishes muted-with-unreads from a fully
-		// read row visually.
-		hasUnread := readState[item.ID].HasUnread && !item.IsMuted
+		// read row visually. Predicate lives on ChannelItem so the
+		// App's tab-title counter and section aggregates agree.
+		hasUnread := item.IsVisiblyUnread(readState[item.ID])
 
 		// Unread dot indicator (same regardless of selection state).
 		unreadDot := " "

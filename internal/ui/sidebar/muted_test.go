@@ -115,3 +115,70 @@ func TestAggregateBadge_AllMutedDropsBadge(t *testing.T) {
 		}
 	}
 }
+
+// TestChannelItem_IsVisiblyUnread locks in the single predicate that
+// drives the sidebar dot, the section aggregate, AND the tab-title
+// count. If a future change diverges any of those call sites from the
+// predicate captured here, the corresponding render/count tests will
+// fail -- but this one fails first and points directly at the rule.
+func TestChannelItem_IsVisiblyUnread(t *testing.T) {
+	cases := []struct {
+		name  string
+		item  ChannelItem
+		state cache.ReadState
+		want  bool
+	}{
+		{"unread, unmuted", ChannelItem{IsMuted: false}, cache.ReadState{HasUnread: true}, true},
+		{"unread, muted", ChannelItem{IsMuted: true}, cache.ReadState{HasUnread: true}, false},
+		{"read, unmuted", ChannelItem{IsMuted: false}, cache.ReadState{HasUnread: false}, false},
+		{"read, muted", ChannelItem{IsMuted: true}, cache.ReadState{HasUnread: false}, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := tc.item.IsVisiblyUnread(tc.state); got != tc.want {
+				t.Errorf("IsVisiblyUnread = %v want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestUnreadChannelCount_NoReader(t *testing.T) {
+	m := New([]ChannelItem{
+		{ID: "C1", Name: "general", Type: "channel"},
+	})
+	if got := m.UnreadChannelCount(); got != 0 {
+		t.Errorf("UnreadChannelCount with no reader = %d want 0", got)
+	}
+}
+
+// TestUnreadChannelCount_FiltersMute proves the count uses
+// IsVisiblyUnread -- muted-but-unread channels are excluded, matching
+// the dot population. If this assertion ever drifts from the sidebar
+// dot count, the predicate has been duplicated somewhere.
+func TestUnreadChannelCount_FiltersMute(t *testing.T) {
+	m := New([]ChannelItem{
+		{ID: "C1", Name: "a", Type: "channel", IsMuted: false},
+		{ID: "C2", Name: "b", Type: "channel", IsMuted: false},
+		{ID: "C3", Name: "c", Type: "channel", IsMuted: true},
+		{ID: "C4", Name: "d", Type: "channel", IsMuted: false},
+	})
+	m.SetReadStateReader(func() map[string]cache.ReadState {
+		return map[string]cache.ReadState{
+			"C1": {HasUnread: true},  // counted
+			"C2": {HasUnread: false}, // skipped (read)
+			"C3": {HasUnread: true},  // skipped (muted)
+			"C4": {HasUnread: true},  // counted
+		}
+	})
+	if got := m.UnreadChannelCount(); got != 2 {
+		t.Errorf("UnreadChannelCount = %d want 2 (C1, C4)", got)
+	}
+}
+
+func TestUnreadChannelCount_EmptySidebar(t *testing.T) {
+	m := New(nil)
+	m.SetReadStateReader(func() map[string]cache.ReadState { return nil })
+	if got := m.UnreadChannelCount(); got != 0 {
+		t.Errorf("UnreadChannelCount with no items = %d want 0", got)
+	}
+}
