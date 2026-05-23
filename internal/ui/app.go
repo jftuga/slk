@@ -469,31 +469,10 @@ func (a *App) handleKey(msg tea.KeyMsg) tea.Cmd {
 		return nil
 	}
 
-	// Mode-specific handling
-	switch a.mode {
-	case ModeInsert:
-		return a.handleInsertMode(msg)
-	case ModeCommand:
-		return a.handleCommandMode(msg)
-	case ModeChannelFinder:
-		return a.handleChannelFinderMode(msg)
-	case ModeReactionPicker:
-		return a.handleReactionPickerMode(msg)
-	case ModeConfirm:
-		return a.handleConfirmMode(msg)
-	case ModeWorkspaceFinder:
-		return a.handleWorkspaceFinderMode(msg)
-	case ModeThemeSwitcher:
-		return a.handleThemeSwitcherMode(msg)
-	case ModePresenceMenu:
-		return a.handlePresenceMenuMode(msg)
-	case ModePresenceCustomSnooze:
-		return a.handlePresenceCustomSnoozeMode(msg)
-	case ModeHelp:
-		return a.handleHelpMode(msg)
-	default:
-		return a.handleNormalMode(msg)
-	}
+	// Mode-specific handling. Dispatch table lives in
+	// mode_handlers.go; unmapped modes fall back to Normal
+	// (mirrors the pre-Phase-5 `default:` arm).
+	return dispatchModeKey(a, msg)
 }
 
 // navigateBack walks the per-workspace history stack one step
