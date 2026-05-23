@@ -93,6 +93,45 @@ half-block rendering automatically — no config change needed. To force a
 specific renderer regardless of detection, set `image_protocol` in
 `config.toml` to `kitty`, `sixel`, `halfblock`, or `off`.
 
+## Unread indicator in tmux
+
+`slk` sets the terminal window title to reflect unread state — for
+example `slk SW (3) +1` means three channels-with-unreads in the active
+workspace and at least one other workspace also has unreads. The
+two-letter prefix is the active workspace's initials (matching the
+left-rail label).
+
+Outside tmux this just works — modern terminals (Kitty, WezTerm,
+Alacritty, Ghostty, iTerm2, Windows Terminal, gnome-terminal) render
+title changes in their tab/window chrome.
+
+Inside tmux there's an extra step. tmux intercepts the title escape
+from slk, and only re-emits it to the outer terminal when title
+forwarding is on, *and* it uses its own title template by default
+(`#W` = window name) rather than the pane's title. Add both lines to
+`~/.tmux.conf`:
+
+```tmux
+set -g set-titles on
+set -g set-titles-string '#T'
+```
+
+`#T` (active pane title) is what carries slk's string. Reload tmux for
+the setting to take effect (`tmux kill-server`, then reattach). Verify
+with:
+
+```bash
+tmux show -gv set-titles
+tmux show -gv set-titles-string
+```
+
+Expected output: `on` and `#T`.
+
+If you'd prefer slk's unread indicator to work in tmux without any
+config change at all, that's tracked as a follow-up — it requires
+passing the title escape through tmux's DCS passthrough rather than
+relying on `set-titles`. Not in this release.
+
 ## Debugging
 
 Set `SLK_DEBUG=1` to enable a comprehensive debug log written to
