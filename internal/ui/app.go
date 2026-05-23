@@ -921,63 +921,7 @@ func (a *App) handleInsertMode(msg tea.KeyMsg) tea.Cmd {
 
 // handlePresenceCustomSnoozeMode moved to mode_presence_snooze.go (Phase 5d).
 
-func (a *App) handleReactionPickerMode(msg tea.KeyMsg) tea.Cmd {
-	keyStr := msg.String()
-
-	switch msg.Key().Code {
-	case tea.KeyEscape:
-		keyStr = "esc"
-	case tea.KeyEnter:
-		keyStr = "enter"
-	case tea.KeyUp:
-		keyStr = "up"
-	case tea.KeyDown:
-		keyStr = "down"
-	case tea.KeyBackspace:
-		keyStr = "backspace"
-	}
-
-	// Capture values before HandleKey (which may call Close and reset them)
-	channelID := a.reactionPicker.ChannelID()
-	messageTS := a.reactionPicker.MessageTS()
-
-	result := a.reactionPicker.HandleKey(keyStr)
-
-	if !a.reactionPicker.IsVisible() {
-		// Esc was pressed
-		a.SetMode(ModeNormal)
-		return nil
-	}
-
-	if result != nil {
-		emojiName := result.Emoji
-
-		a.reactionPicker.Close()
-		a.SetMode(ModeNormal)
-
-		// Record frecent usage on add (not remove)
-		if !result.Remove {
-			a.reactions.RecordFrecent(emojiName)
-		}
-
-		// Optimistic update
-		a.updateReactionOnMessage(channelID, messageTS, emojiName, a.currentUserID, result.Remove)
-
-		// Fire API call
-		if result.Remove {
-			return func() tea.Msg {
-				err := a.reactions.Remove(channelID, messageTS, emojiName)
-				return ReactionSentMsg{Err: err}
-			}
-		}
-		return func() tea.Msg {
-			err := a.reactions.Add(channelID, messageTS, emojiName)
-			return ReactionSentMsg{Err: err}
-		}
-	}
-
-	return nil
-}
+// handleReactionPickerMode moved to mode_reaction_picker.go (Phase 5i).
 
 func (a *App) handleConfirmMode(msg tea.KeyMsg) tea.Cmd {
 	keyStr := msg.String()
