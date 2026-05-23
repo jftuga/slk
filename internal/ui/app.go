@@ -17,7 +17,6 @@ import (
 	"charm.land/bubbles/v2/key"
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
-	"golang.design/x/clipboard"
 	"github.com/gammons/slk/internal/cache"
 	"github.com/gammons/slk/internal/config"
 	"github.com/gammons/slk/internal/debuglog"
@@ -42,6 +41,7 @@ import (
 	"github.com/gammons/slk/internal/ui/threadsview"
 	"github.com/gammons/slk/internal/ui/workspace"
 	"github.com/gammons/slk/internal/ui/workspacefinder"
+	"golang.design/x/clipboard"
 )
 
 type Panel int
@@ -115,6 +115,12 @@ type App struct {
 	activeChannelID string
 	activeTeamID    string // workspace whose data is currently loaded into the side panels
 
+	// windowTitle is the cached terminal-window-title string, recomputed
+	// by notifyReadStateChanged on every read-state mutation and read by
+	// View() into tea.View.WindowTitle. Bubbletea's renderer emits OSC 2
+	// only when the value changes between renders -- no per-frame work.
+	// See docs/superpowers/specs/2026-05-21-tab-title-unread-indicator-design.md.
+	windowTitle string
 	// Callbacks
 	// channels is the App's ChannelService collaborator (Slack
 	// channels API + local cache + session bookkeeping). See
@@ -177,14 +183,14 @@ type App struct {
 	pendingThreadFetchGen uint64
 
 	// Reaction picker
-	reactionPicker   *reactionpicker.Model
-	confirmPrompt    *confirmprompt.Model
+	reactionPicker *reactionpicker.Model
+	confirmPrompt  *confirmprompt.Model
 	// reactions is the App's ReactionService collaborator (add/remove
 	// reactions on Slack + load/record frecent emoji history). See
 	// internal/ui/services.go. Defaulted to a no-op adapter in NewApp
 	// so call sites can dispatch without nil-checks.
-	reactions ReactionService
-	currentUserID    string
+	reactions     ReactionService
+	currentUserID string
 
 	// editing tracks in-progress message edit state. See
 	// internal/ui/edit.go.
@@ -304,6 +310,7 @@ func NewApp() *App {
 		keys:                 DefaultKeyMap(),
 		selfSend:             newSelfSendDedup(),
 		bootstrap:            newWorkspaceBootstrap(),
+		windowTitle:          "slk",
 		threadsDirtyDebounce: 150 * time.Millisecond,
 		mouseWheelLines:      3,
 		userNames:            map[string]string{},
@@ -442,9 +449,9 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			cmds = append(cmds, cmd)
 		}
 
-	// All non-WindowSize, non-Key message types are owned by Phase 4
-	// reducers; see the dispatch chain at the top of Update and the
-	// per-family reducer_*.go files / controller Handle methods.
+		// All non-WindowSize, non-Key message types are owned by Phase 4
+		// reducers; see the dispatch chain at the top of Update and the
+		// per-family reducer_*.go files / controller Handle methods.
 	}
 
 	return a, tea.Batch(cmds...)
@@ -1698,8 +1705,6 @@ func (a *App) nowFormatted() string {
 	return time.Now().Format("3:04 PM")
 }
 
-
-
 // ActiveChannelID returns the ID of the currently viewed channel.
 func (a *App) ActiveChannelID() string {
 	return a.activeChannelID
@@ -1815,6 +1820,7 @@ func (a *App) renderTypingLine() string {
 
 func (a *App) View() tea.View {
 	if v, handled := a.renderEarlyFallback(); handled {
+		v.WindowTitle = a.windowTitle
 		return v
 	}
 
@@ -1861,6 +1867,7 @@ func (a *App) View() tea.View {
 	v := tea.NewView(a.maybeWrapFinalScreen(screen))
 	v.AltScreen = true
 	v.MouseMode = tea.MouseModeCellMotion
+	v.WindowTitle = a.windowTitle
 	return v
 }
 
@@ -2079,14 +2086,23 @@ func (a *App) beginEditOfSelected() tea.Cmd {
 	return a.compose.Focus()
 }
 
-// notifyReadStateChanged invalidates the sidebar render cache and
-// refreshes the workspace rail's HasUnread flags. Call this whenever
-// per-channel read state is mutated via the DB API (i.e., wherever
-// a.sidebar.Invalidate() used to suffice). Pairing them prevents the
-// rail from going stale when the sidebar updates.
+// notifyReadStateChanged invalidates the sidebar render cache,
+// refreshes the workspace rail's HasUnread flags, and recomputes the
+// cached terminal-window title. Call this whenever per-channel read
+// state is mutated via the DB API (i.e., wherever a.sidebar.Invalidate()
+// used to suffice). All three operations are downstream consumers of
+// the same DB read-state change and MUST stay in lockstep -- e.g., the
+// rail going stale while the sidebar updates was an earlier bug class
+// this single hook prevents.
 func (a *App) notifyReadStateChanged() {
 	a.sidebar.Invalidate()
 	a.workspaceRail.RefreshUnreads()
+	a.windowTitle = computeWindowTitle(
+		a.activeTeamID,
+		a.workspaceRail.NameByID(a.activeTeamID),
+		a.sidebar.UnreadChannelCount(),
+		a.workspaceRail.OtherUnreadCount(a.activeTeamID),
+	)
 }
 
 // applyChannelMark updates local state for a channel-level read-state

@@ -14,15 +14,16 @@ import (
 	"time"
 
 	tea "charm.land/bubbletea/v2"
-	"golang.design/x/clipboard"
 	"github.com/gammons/slk/internal/cache"
+	"github.com/gammons/slk/internal/ids"
 	imgpkg "github.com/gammons/slk/internal/image"
 	"github.com/gammons/slk/internal/ui/compose"
-	"github.com/gammons/slk/internal/ids"
 	"github.com/gammons/slk/internal/ui/messages"
 	"github.com/gammons/slk/internal/ui/sidebar"
 	"github.com/gammons/slk/internal/ui/statusbar"
 	"github.com/gammons/slk/internal/ui/styles"
+	"github.com/gammons/slk/internal/ui/workspace"
+	"golang.design/x/clipboard"
 )
 
 func TestAppFocusCycle(t *testing.T) {
@@ -4143,6 +4144,112 @@ func TestChannelSelectedInvokesMembershipFetcher(t *testing.T) {
 // returns within a short deadline. If a future maintainer changes
 // the wiring to once-again call a blocking fetcher synchronously,
 // this test fails the deadline.
+// setupAppForTitleTest builds an App wired with the readers and items
+// the window-title pipeline depends on. Returns the app plus the
+// mutable channel-state and workspace-unreads slices the caller can
+// re-point the readers at without re-wiring.
+func setupAppForTitleTest(
+	t *testing.T,
+	channels []sidebar.ChannelItem,
+	workspaces []workspace.WorkspaceItem,
+	channelState map[string]cache.ReadState,
+	workspaceUnreads []string,
+) *App {
+	t.Helper()
+	app := NewApp()
+	app.SetWorkspaces(workspaces)
+	app.SetChannels(channels)
+	app.SetReadStateReader(func() map[string]cache.ReadState { return channelState })
+	app.SetWorkspaceUnreadReader(func() []string { return workspaceUnreads })
+	return app
+}
+
+// TestNotifyReadStateChanged_PopulatesWindowTitle is the canonical
+// wiring test. It verifies that notifyReadStateChanged actually plumbs
+// each input from the collaborator the architecture assigns to it:
+//   - active count comes from the sidebar (mute-filtered)
+//   - other-workspace count comes from the rail (not mute-filtered)
+//   - workspace name comes from the rail for the active team
+//
+// If a future refactor reroutes any of these sources, the assertions
+// fall over and point at the wiring break.
+func TestNotifyReadStateChanged_PopulatesWindowTitle(t *testing.T) {
+	app := setupAppForTitleTest(t,
+		[]sidebar.ChannelItem{
+			{ID: "C1", Name: "general", Type: "channel", IsMuted: false},
+			{ID: "C2", Name: "noisy", Type: "channel", IsMuted: true},
+			{ID: "C3", Name: "design", Type: "channel", IsMuted: false},
+		},
+		[]workspace.WorkspaceItem{
+			{ID: "T1", Name: "SWAP", Initials: "SW"},
+			{ID: "T2", Name: "Other", Initials: "OT"},
+		},
+		map[string]cache.ReadState{
+			"C1": {HasUnread: true},  // counted toward active
+			"C2": {HasUnread: true},  // muted: NOT counted toward active
+			"C3": {HasUnread: false}, // read: NOT counted
+		},
+		[]string{"T1", "T2"}, // T1 active, T2 contributes to +1
+	)
+	app.activeTeamID = "T1"
+
+	app.notifyReadStateChanged()
+
+	if got, want := app.windowTitle, "slk SW (1) +1"; got != want {
+		t.Errorf("windowTitle = %q want %q", got, want)
+	}
+}
+
+func TestNotifyReadStateChanged_PreBootstrap(t *testing.T) {
+	app := NewApp()
+	// activeTeamID intentionally left blank
+	app.notifyReadStateChanged()
+	if got, want := app.windowTitle, "slk"; got != want {
+		t.Errorf("pre-bootstrap windowTitle = %q want %q", got, want)
+	}
+}
+
+func TestNotifyReadStateChanged_NoUnreads(t *testing.T) {
+	app := setupAppForTitleTest(t,
+		[]sidebar.ChannelItem{{ID: "C1", Name: "general", Type: "channel"}},
+		[]workspace.WorkspaceItem{{ID: "T1", Name: "SWAP", Initials: "SW"}},
+		map[string]cache.ReadState{"C1": {HasUnread: false}},
+		nil,
+	)
+	app.activeTeamID = "T1"
+
+	app.notifyReadStateChanged()
+
+	if got, want := app.windowTitle, "slk SW"; got != want {
+		t.Errorf("windowTitle = %q want %q", got, want)
+	}
+}
+
+// TestView_PropagatesWindowTitle proves View() surfaces the cached
+// title onto tea.View.WindowTitle from BOTH return sites: the
+// pre-layout fallback (width/height==0) and the full-layout main
+// branch. Bubbletea's renderer only emits the OSC sequence when this
+// field changes between renders, so a missed assignment silently
+// disables the feature.
+func TestView_PropagatesWindowTitle(t *testing.T) {
+	app := NewApp()
+	app.windowTitle = "slk SW (2) +1"
+
+	// Pre-layout branch (width/height==0).
+	v := app.View()
+	if v.WindowTitle != "slk SW (2) +1" {
+		t.Errorf("pre-layout View.WindowTitle = %q want %q", v.WindowTitle, "slk SW (2) +1")
+	}
+
+	// Main branch: give the app a real canvas size and re-render.
+	app.width = 100
+	app.height = 30
+	v = app.View()
+	if v.WindowTitle != "slk SW (2) +1" {
+		t.Errorf("main View.WindowTitle = %q want %q", v.WindowTitle, "slk SW (2) +1")
+	}
+}
+
 func TestChannelSelectedReturnsPromptlyEvenIfFetcherBlocks(t *testing.T) {
 	app := NewApp()
 	app.activeTeamID = "T1"
