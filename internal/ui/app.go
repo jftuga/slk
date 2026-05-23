@@ -99,45 +99,6 @@ type dragState struct {
 // finally lands on.
 const openThreadDebounceDelay = 200 * time.Millisecond
 
-// panelCache stores the fully-wrapped (border + exactSize) output of a panel
-// keyed on a tuple of inputs that affect its rendering. A cache hit returns
-// the previous frame's string verbatim; a miss recomputes and stores.
-//
-// layoutKey is a free-form int64 callers can use to encode focus state,
-// mode, theme version, and layout-toggle bits as a single comparable value.
-type panelCache struct {
-	output       string
-	panelVersion int64
-	width        int
-	height       int
-	layoutKey    int64
-	valid        bool
-}
-
-func (c *panelCache) hit(panelVersion int64, width, height int, layoutKey int64) bool {
-	return c.valid &&
-		c.panelVersion == panelVersion &&
-		c.width == width &&
-		c.height == height &&
-		c.layoutKey == layoutKey
-}
-
-func (c *panelCache) store(out string, panelVersion int64, width, height int, layoutKey int64) {
-	c.output = out
-	c.panelVersion = panelVersion
-	c.width = width
-	c.height = height
-	c.layoutKey = layoutKey
-	c.valid = true
-}
-
-func boolToInt(b bool) int64 {
-	if b {
-		return 1
-	}
-	return 0
-}
-
 type App struct {
 	// Sub-models
 	workspaceRail   workspace.Model
@@ -174,18 +135,9 @@ type App struct {
 	layoutSidebarHeight int
 	layoutThreadHeight  int
 
-	// Per-panel render caches. Each panel exposes Version() that increments
-	// on any state change that could alter its View() output. The App caches
-	// the FULLY-WRAPPED panel output (panel.View + border + exactSize) keyed
-	// on (panelVersion, width, height, layoutKey). On compose keystrokes,
-	// only compose's version changes so all the other panels' wrapped
-	// outputs are reused -- saving the bulk of the per-keystroke render cost.
-	panelCacheRail     panelCache
-	panelCacheSidebar  panelCache
-	panelCacheMsgPanel panelCache // used by the threads-list view (no compose)
-	panelCacheMsgTop   panelCache // bordered messages region (channel view); compose+typing rendered fresh below
-	panelCacheThread   panelCache // used by the thread side panel's bordered top region
-	panelCacheStatus   panelCache
+	// renderCache aggregates the six per-panel render caches. See
+	// internal/ui/panelcache.go.
+	renderCache *panelRenderCache
 
 	// Current context
 	activeChannelID string
@@ -425,6 +377,7 @@ func NewApp() *App {
 		userNames:            map[string]string{},
 		externalUsers:        map[string]bool{},
 		presence:             newPresenceController(),
+		renderCache:          newPanelRenderCache(),
 		lastChannelByTeam:    map[string]string{},
 		navHistory:           newNavHistoryStore(),
 		clipboardRead:        defaultClipboardReader,
@@ -4385,11 +4338,11 @@ func (a *App) View() tea.View {
 	// Render workspace rail (uses rail background so empty cells around
 	// the workspace tiles match the rail color, not the message pane).
 	railLayoutKey := themeVer
-	if c := &a.panelCacheRail; !c.hit(a.workspaceRail.Version(), railWidth, contentHeight, railLayoutKey) {
+	if c := &a.renderCache.rail; !c.hit(a.workspaceRail.Version(), railWidth, contentHeight, railLayoutKey) {
 		out := exactSizeBg(a.workspaceRail.View(contentHeight), railWidth, contentHeight, styles.RailBackground)
 		c.store(out, a.workspaceRail.Version(), railWidth, contentHeight, railLayoutKey)
 	}
-	rail := a.panelCacheRail.output
+	rail := a.renderCache.rail.output
 
 	var panels []string
 	panels = append(panels, rail)
@@ -4406,7 +4359,7 @@ func (a *App) View() tea.View {
 		// a flip and the cache key includes that version.
 		a.sidebar.SetFocused(sbFocused)
 		sbLayoutKey := themeVer<<1 | boolToInt(sbFocused)
-		if c := &a.panelCacheSidebar; !c.hit(a.sidebar.Version(), sidebarWidth, contentHeight, sbLayoutKey) {
+		if c := &a.renderCache.sidebar; !c.hit(a.sidebar.Version(), sidebarWidth, contentHeight, sbLayoutKey) {
 			borderStyle := lipgloss.NewStyle().
 				BorderStyle(lipgloss.RoundedBorder()).
 				BorderForeground(styles.Border).
@@ -4426,7 +4379,7 @@ func (a *App) View() tea.View {
 			out := exactSizeBg(sidebarView, sidebarWidth+sidebarBorder, contentHeight, styles.SidebarBackground)
 			c.store(out, a.sidebar.Version(), sidebarWidth, contentHeight, sbLayoutKey)
 		}
-		panels = append(panels, a.panelCacheSidebar.output)
+		panels = append(panels, a.renderCache.sidebar.output)
 		a.layoutSidebarHeight = contentHeight - 2
 	}
 
@@ -4489,7 +4442,7 @@ func (a *App) View() tea.View {
 		a.threadsView.SetUserNames(a.userNames)
 		a.threadsView.SetSelfUserID(a.currentUserID)
 		tvVersion := a.threadsView.Version()
-		if c := &a.panelCacheMsgPanel; !c.hit(tvVersion, msgWidth, contentHeight, msgLayoutKey) {
+		if c := &a.renderCache.msgPanel; !c.hit(tvVersion, msgWidth, contentHeight, msgLayoutKey) {
 			msgBorderStyle := styles.UnfocusedBorder.Width(msgWidth)
 			if msgFocused {
 				msgBorderStyle = styles.FocusedBorder.Width(msgWidth)
@@ -4507,7 +4460,7 @@ func (a *App) View() tea.View {
 			)
 			c.store(out, tvVersion, msgWidth, contentHeight, msgLayoutKey)
 		}
-		panels = append(panels, a.panelCacheMsgPanel.output)
+		panels = append(panels, a.renderCache.msgPanel.output)
 	} else {
 		// Channel view: split into cached top region + fresh bottom region.
 		composeView := a.compose.View(msgWidth-2, composeFocused)
@@ -4556,7 +4509,7 @@ func (a *App) View() tea.View {
 		topPanelVersion := a.messagepane.Version()
 		topLayoutKey := msgLayoutKey | int64(composeHeight)<<16
 		topHeight := msgContentHeight + 1 // +1 for top border edge
-		if c := &a.panelCacheMsgTop; !c.hit(topPanelVersion, msgWidth, topHeight, topLayoutKey) {
+		if c := &a.renderCache.msgTop; !c.hit(topPanelVersion, msgWidth, topHeight, topLayoutKey) {
 			topBorderStyle := styles.UnfocusedBorder.Width(msgWidth).
 				BorderTop(true).BorderLeft(true).BorderRight(true).BorderBottom(false)
 			if msgFocused {
@@ -4571,7 +4524,7 @@ func (a *App) View() tea.View {
 			)
 			c.store(out, topPanelVersion, msgWidth, topHeight, topLayoutKey)
 		}
-		topBordered := a.panelCacheMsgTop.output
+		topBordered := a.renderCache.msgTop.output
 
 		// Fresh bottom region: typing line + compose, with bottom edge.
 		// Same lipgloss/v2 quirk applies -- explicit BorderBottom/Left/Right(true)
@@ -4629,7 +4582,7 @@ func (a *App) View() tea.View {
 		threadTopVersion := a.threadPanel.Version()
 		threadTopLayoutKey := threadLayoutKey | int64(threadComposeHeight)<<16
 		threadTopHeight := threadContentHeight + 1 // +1 top border edge
-		if c := &a.panelCacheThread; !c.hit(threadTopVersion, threadWidth, threadTopHeight, threadTopLayoutKey) {
+		if c := &a.renderCache.thread; !c.hit(threadTopVersion, threadWidth, threadTopHeight, threadTopLayoutKey) {
 			// See lipgloss/v2 quirk note on the message-pane top region.
 			topBorderStyle := styles.UnfocusedBorder.Width(threadWidth).
 				BorderTop(true).BorderLeft(true).BorderRight(true).BorderBottom(false)
@@ -4645,7 +4598,7 @@ func (a *App) View() tea.View {
 			)
 			c.store(out, threadTopVersion, threadWidth, threadTopHeight, threadTopLayoutKey)
 		}
-		threadTopBordered := a.panelCacheThread.output
+		threadTopBordered := a.renderCache.thread.output
 
 		// Fresh bottom region.
 		bottomBorderStyle := styles.UnfocusedBorder.Width(threadWidth).
@@ -4682,7 +4635,7 @@ func (a *App) View() tea.View {
 
 	// Cache the status row (rail-spacer + statusbar). It depends only on
 	// statusbar.Version, statusWidth, and theme.
-	if c := &a.panelCacheStatus; !c.hit(a.statusbar.Version(), statusWidth, 1, themeVer) {
+	if c := &a.renderCache.status; !c.hit(a.statusbar.Version(), statusWidth, 1, themeVer) {
 		railSpacer := lipgloss.NewStyle().
 			Width(railWidth).
 			Background(styles.RailBackground).
@@ -4690,7 +4643,7 @@ func (a *App) View() tea.View {
 		out := lipgloss.JoinHorizontal(lipgloss.Center, railSpacer, a.statusbar.View(statusWidth))
 		c.store(out, a.statusbar.Version(), statusWidth, 1, themeVer)
 	}
-	status := a.panelCacheStatus.output
+	status := a.renderCache.status.output
 
 	screen := lipgloss.JoinVertical(lipgloss.Left, content, status)
 
