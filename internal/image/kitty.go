@@ -84,13 +84,72 @@ type KittyRenderer struct {
 
 	mu      sync.Mutex
 	sources map[string]image.Image
+	// placeholders memoizes buildPlaceholderLines results so warm
+	// RenderKey calls (fresh=false: image already uploaded) skip the
+	// cells.Y * cells.X strings.Builder cost on every render.
+	//
+	// The output of buildPlaceholderLines is fully deterministic in
+	// (id, target): each cell encodes the kitty image id in its SGR
+	// foreground color plus row/col diacritics, none of which depend
+	// on any state outside id/cells. Therefore the cached slice can
+	// be returned by reference safely -- callers never mutate the
+	// returned lines (verified by lipgloss / viewport / messagepane
+	// flatten paths).
+	//
+	// Cache is never evicted: even if the registry recycles an id
+	// (a different image binds to id N later), the cached lines
+	// still encode "color N" which the terminal resolves to whichever
+	// image currently owns id N -- producing correct output by
+	// indirection. Memory cost is O(images_seen * avg_lines_per_image)
+	// per session, ~12KB per typical 60x20 cached image.
+	placeholders map[placeholderKey][]string
+
+	// payloads memoizes the base64-encoded PNG payload per (id, target).
+	//
+	// Why this exists: Registry.Lookup keeps returning fresh=true for
+	// any image whose OnFlush has never fired -- and OnFlush only fires
+	// for messages whose viewEntry currently sits inside the visible
+	// viewport (see internal/ui/messages/model.go:2748). For an
+	// image-heavy channel with 21 images but only ~5 visible at a
+	// time, 16 of the 21 images would re-pay bilinear-resize +
+	// PNG-encode + base64 on EVERY buildCache because their
+	// MarkUploaded was never called. That cost (~22 ms/image at
+	// typical Slack thumbnail sizes) is the dominant remaining channel-
+	// switch latency observed in slk-debug.log perf traces.
+	//
+	// The cache is keyed by (id, target). The source image bound to
+	// `key` via SetSource is content-addressable upstream (BK-<sha1>
+	// from URL, or F-<fileID>) so the same key always binds the same
+	// pixel data -- the cached payload is safe to reuse across
+	// arbitrarily many RenderKey calls within a session. Registry IDs
+	// are monotonic and never reused, so (id, target) → payload is
+	// stable for the session.
+	//
+	// Memory cost: a 480x256 RGBA → PNG → base64 typically encodes to
+	// ~10-30KB. For ~1000 distinct images per long session, ~20MB.
+	// Acceptable; if it ever becomes a concern, an LRU eviction can
+	// be added without changing the contract.
+	payloads map[placeholderKey]string
+}
+
+// placeholderKey scopes the buildPlaceholderLines memo by the inputs
+// the function actually consumes: the kitty image id (encoded into
+// every cell's SGR foreground) and the cell dimensions. Reused as
+// the key for the payload memo -- both caches scope by the same
+// (id, target) tuple.
+type placeholderKey struct {
+	id     uint32
+	cellsX int
+	cellsY int
 }
 
 // NewKittyRenderer constructs a kitty renderer backed by the given registry.
 func NewKittyRenderer(reg *Registry) *KittyRenderer {
 	return &KittyRenderer{
-		registry: reg,
-		sources:  map[string]image.Image{},
+		registry:     reg,
+		sources:      map[string]image.Image{},
+		placeholders: map[placeholderKey][]string{},
+		payloads:     map[placeholderKey]string{},
 	}
 }
 
@@ -129,9 +188,22 @@ func (k *KittyRenderer) RenderKey(key string, target image.Point) Render {
 
 	id, fresh := k.registry.Lookup(key, target)
 
-	lines := buildPlaceholderLines(id, target)
-	debuglog.ImgRender("kitty.RenderKey: key=%s target=(%d,%d) image_id=%d fresh=%v lines=%d",
-		key, target.X, target.Y, id, fresh, len(lines))
+	// Fast path: cached placeholder lines for (id, target). The lines
+	// are deterministic in those inputs so the cache result is
+	// byte-identical to a freshly-computed slice -- guarded by
+	// TestKitty_RenderKeyWarmMatchesCold.
+	phKey := placeholderKey{id: id, cellsX: target.X, cellsY: target.Y}
+	k.mu.Lock()
+	lines, phHit := k.placeholders[phKey]
+	k.mu.Unlock()
+	if !phHit {
+		lines = buildPlaceholderLines(id, target)
+		k.mu.Lock()
+		k.placeholders[phKey] = lines
+		k.mu.Unlock()
+	}
+	debuglog.ImgRender("kitty.RenderKey: key=%s target=(%d,%d) image_id=%d fresh=%v lines=%d ph_cache=%v",
+		key, target.X, target.Y, id, fresh, len(lines), phHit)
 
 	r := Render{
 		Cells:    target,
@@ -140,42 +212,62 @@ func (k *KittyRenderer) RenderKey(key string, target image.Point) Render {
 		ID:       id,
 	}
 	if fresh {
-		// Only resize+encode when the image is actually being uploaded.
-		// On repeat calls (fresh=false) the registered ID has already
-		// been confirmed delivered via MarkUploaded; no need to re-do
-		// the bilinear downscale or PNG encode.
-		pxW := target.X * 8
-		pxH := target.Y * 16
-		resized := image.NewRGBA(image.Rect(0, 0, pxW, pxH))
-		draw.BiLinear.Scale(resized, resized.Bounds(), src, src.Bounds(), draw.Over, nil)
-		var pngBuf bytes.Buffer
-		if err := imgpng.Encode(&pngBuf, resized); err == nil {
-			payload := base64.StdEncoding.EncodeToString(pngBuf.Bytes())
-			imgID := id
-			cellsCols := target.X
-			cellsRows := target.Y
-			reg := k.registry
-			// fired guards against per-closure double-emission (e.g. the
-			// same viewEntry being flushed twice in one frame). The
-			// registry's MarkUploaded guards against double-emission
-			// across DIFFERENT closures for the same (key, target) —
-			// without that, a cache rebuild that discards an unfired
-			// closure (e.g. SetMessages on the messages pane) would
-			// leave the registry thinking the upload had landed when in
-			// fact no bytes were ever sent.
-			var fired atomic.Bool
-			r.OnFlush = func(w io.Writer) error {
-				if !fired.CompareAndSwap(false, true) {
-					return nil
-				}
-				debuglog.ImgRender("kitty.OnFlush: image_id=%d cells=(%d,%d) payload_len=%d",
-					imgID, cellsCols, cellsRows, len(payload))
-				if err := emitKittyUpload(w, imgID, payload, cellsCols, cellsRows); err != nil {
-					return err
-				}
-				reg.MarkUploaded(imgID)
+		// Off-screen viewEntries never get their OnFlush fired, so
+		// Registry.Lookup keeps returning fresh=true for them on every
+		// buildCache. Without the payload cache, this re-pays bilinear
+		// resize + PNG encode + base64 -- the dominant channel-switch
+		// cost for image-heavy channels. The cache short-circuits the
+		// expensive work; the upload bytes are STILL emitted via
+		// OnFlush so the terminal eventually receives them (idempotent
+		// from kitty's perspective: re-transmitting the same image id
+		// just re-asserts the binding).
+		payloadKey := phKey
+		k.mu.Lock()
+		payload, payloadHit := k.payloads[payloadKey]
+		k.mu.Unlock()
+		if !payloadHit {
+			pxW := target.X * 8
+			pxH := target.Y * 16
+			resized := image.NewRGBA(image.Rect(0, 0, pxW, pxH))
+			draw.BiLinear.Scale(resized, resized.Bounds(), src, src.Bounds(), draw.Over, nil)
+			var pngBuf bytes.Buffer
+			if err := imgpng.Encode(&pngBuf, resized); err == nil {
+				payload = base64.StdEncoding.EncodeToString(pngBuf.Bytes())
+				k.mu.Lock()
+				k.payloads[payloadKey] = payload
+				k.mu.Unlock()
+			} else {
+				// Encode failed; without a payload we can't build an
+				// OnFlush. Return r without one and let the caller
+				// fall back to its placeholder lines (still drawn,
+				// just never resolved by the terminal).
+				return r
+			}
+		}
+		imgID := id
+		cellsCols := target.X
+		cellsRows := target.Y
+		reg := k.registry
+		// fired guards against per-closure double-emission (e.g. the
+		// same viewEntry being flushed twice in one frame). The
+		// registry's MarkUploaded guards against double-emission
+		// across DIFFERENT closures for the same (key, target) —
+		// without that, a cache rebuild that discards an unfired
+		// closure (e.g. SetMessages on the messages pane) would
+		// leave the registry thinking the upload had landed when in
+		// fact no bytes were ever sent.
+		var fired atomic.Bool
+		r.OnFlush = func(w io.Writer) error {
+			if !fired.CompareAndSwap(false, true) {
 				return nil
 			}
+			debuglog.ImgRender("kitty.OnFlush: image_id=%d cells=(%d,%d) payload_len=%d payload_cache=%v",
+				imgID, cellsCols, cellsRows, len(payload), payloadHit)
+			if err := emitKittyUpload(w, imgID, payload, cellsCols, cellsRows); err != nil {
+				return err
+			}
+			reg.MarkUploaded(imgID)
+			return nil
 		}
 	}
 	return r

@@ -122,6 +122,7 @@ func fetchOrPlaceholder(url string, target image.Point, ctx Context, rowStart in
 	if url == "" {
 		return nil, nil, nil, HitRect{}, false
 	}
+	perf := ctx.Perf // local alias; nil disables timing
 	key := urlCacheKey(url)
 	pixelTarget := image.Pt(target.X*ctx.CellPixels.X, target.Y*ctx.CellPixels.Y)
 
@@ -133,7 +134,15 @@ func fetchOrPlaceholder(url string, target image.Point, ctx Context, rowStart in
 		URL:      url,
 	}
 
+	var cachedT0 time.Time
+	if perf != nil {
+		cachedT0 = time.Now()
+	}
 	img, cached := ctx.Fetcher.Cached(key, pixelTarget)
+	if perf != nil {
+		perf.imgCachedCheckTotal += time.Since(cachedT0)
+		perf.imgCachedCheckCount++
+	}
 	if !cached {
 		// Spawn at most one fetcher goroutine per URL across all
 		// concurrent Render calls. The fetcher itself dedupes on
@@ -177,23 +186,48 @@ func fetchOrPlaceholder(url string, target image.Point, ctx Context, rowStart in
 				}
 			}()
 		}
-		return blockPlaceholder(target), nil, nil, hit, true
+		var phT0 time.Time
+		if perf != nil {
+			phT0 = time.Now()
+		}
+		ph := blockPlaceholder(target)
+		if perf != nil {
+			perf.imgPlaceholderTotal += time.Since(phT0)
+			perf.imgPlaceholderCount++
+		}
+		return ph, nil, nil, hit, true
 	}
 
 	// Cached: render via active protocol. For kitty we go through the
 	// renderer's keyed path so the upload escape is emitted exactly
 	// once per (key, target) pair across the session.
 	if ctx.Protocol == imgpkg.ProtoKitty && ctx.KittyRender != nil {
+		var kT0 time.Time
+		if perf != nil {
+			kT0 = time.Now()
+		}
 		ckey := "BK-" + key
 		ctx.KittyRender.SetSource(ckey, img)
 		out := ctx.KittyRender.RenderKey(ckey, target)
+		if perf != nil {
+			perf.imgKittyTotal += time.Since(kT0)
+			perf.imgKittyCount++
+		}
 		var fl []func(io.Writer) error
 		if out.OnFlush != nil {
 			fl = []func(io.Writer) error{out.OnFlush}
 		}
 		return out.Lines, fl, nil, hit, true
 	}
+	var riT0 time.Time
+	if perf != nil {
+		riT0 = time.Now()
+	}
 	out := imgpkg.RenderImage(ctx.Protocol, img, target)
+	if perf != nil {
+		perf.imgRenderImageTotal += time.Since(riT0)
+		perf.imgRenderImageCount++
+	}
 	var fl []func(io.Writer) error
 	if out.OnFlush != nil {
 		fl = []func(io.Writer) error{out.OnFlush}

@@ -1824,6 +1824,15 @@ func (a *App) View() tea.View {
 		return v
 	}
 
+	// Perf instrumentation: wall-clock the main View() path so we can
+	// correlate user-visible latency (i / arrow keys / thread open-close)
+	// with the cache rebuilds logged from messages.Model.View and
+	// thread.Model.View. SLK_DEBUG=1 only; zero cost otherwise.
+	var viewPerfStart time.Time
+	if debuglog.Enabled() {
+		viewPerfStart = time.Now()
+	}
+
 	// Resolve per-pane widths/borders. Compute stores horizontal bands
 	// for subsequent mouse hit-testing (panelAt) and surfaces a
 	// ThreadAutoHidden flag when the available width can't fit the
@@ -1868,6 +1877,14 @@ func (a *App) View() tea.View {
 	v.AltScreen = true
 	v.MouseMode = tea.MouseModeCellMotion
 	v.WindowTitle = a.windowTitle
+	if debuglog.Enabled() {
+		// panel: 0=workspace 1=sidebar 2=messages 3=thread
+		// view:  0=channels 1=threads
+		debuglog.Perf("App.View total=%s w=%d h=%d panel=%d view=%d mode=%s thread=%v sidebar=%v preview=%v",
+			time.Since(viewPerfStart), a.width, a.height,
+			int(a.focusedPanel), int(a.view), a.mode.String(),
+			a.threadVisible, a.sidebarVisible, previewActive)
+	}
 	return v
 }
 

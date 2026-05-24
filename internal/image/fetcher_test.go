@@ -23,7 +23,7 @@ import (
 //go:embed testdata/tiny.webp
 var tinyWebP []byte
 
-func tinyPNG(t *testing.T, w, h int, c imgcolor.RGBA) []byte {
+func tinyPNG(t testing.TB, w, h int, c imgcolor.RGBA) []byte {
 	t.Helper()
 	src := image.NewRGBA(image.Rect(0, 0, w, h))
 	for y := 0; y < h; y++ {
@@ -135,16 +135,22 @@ func TestFetcher_CachedReturnsImageWhenPresent(t *testing.T) {
 	cache, _ := NewCache(t.TempDir(), 10)
 	f := NewFetcher(cache, http.DefaultClient)
 
-	// Prime the cache via Fetch.
+	// Prime the cache via Fetch. Cached now performs a memo-only
+	// lookup keyed on (key, target), so Fetch and the subsequent
+	// Cached must use the SAME target -- the old disk-decode
+	// fallback that would synthesize a (key, target) memo entry
+	// on demand has been removed (it was a 156ms sync-on-Update
+	// regression; callers now drive an async re-fetch instead).
+	target := image.Pt(20, 20)
 	if _, err := f.Fetch(context.Background(), FetchRequest{
-		Key: "primed", URL: srv.URL, Target: image.Pt(0, 0),
+		Key: "primed", URL: srv.URL, Target: target,
 	}); err != nil {
 		t.Fatal(err)
 	}
 
-	img, ok := f.Cached("primed", image.Pt(20, 20))
+	img, ok := f.Cached("primed", target)
 	if !ok {
-		t.Fatalf("expected Cached to return true after Fetch")
+		t.Fatalf("expected Cached to return true after Fetch at the same target")
 	}
 	if img == nil {
 		t.Fatalf("expected non-nil image")
@@ -153,6 +159,92 @@ func TestFetcher_CachedReturnsImageWhenPresent(t *testing.T) {
 		t.Errorf("expected 20x20 downscale, got %v", img.Bounds())
 	}
 }
+
+// TestFetcher_CachedReturnsFalseOnMemoMissEvenWithDiskHit asserts the
+// contract change: Cached no longer falls back to disk decode. Even
+// when the on-disk cache holds the file, a cold (key, target) memo
+// must return ok=false so the caller can spawn an async Fetch to
+// populate the memo instead of paying the 100-200ms decode cost on
+// the UI thread.
+func TestFetcher_CachedReturnsFalseOnMemoMissEvenWithDiskHit(t *testing.T) {
+	pngBytes := tinyPNG(t, 100, 100, imgcolor.RGBA{0, 0, 200, 255})
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "image/png")
+		w.Write(pngBytes)
+	}))
+	defer srv.Close()
+
+	cache, _ := NewCache(t.TempDir(), 10)
+	f := NewFetcher(cache, http.DefaultClient)
+
+	// Fetch into the disk cache and the (key, target=0x0) memo.
+	if _, err := f.Fetch(context.Background(), FetchRequest{
+		Key: "k", URL: srv.URL, Target: image.Pt(0, 0),
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	// Cached at a DIFFERENT target -- disk has the bytes, but no memo
+	// entry exists for (k, 30x30). Old behavior: open + decode + downscale
+	// to 30x30 synchronously, return (img, true). New behavior: return
+	// (nil, false) so the caller spawns a background Fetch.
+	if img, ok := f.Cached("k", image.Pt(30, 30)); ok {
+		t.Errorf("expected Cached to return false on memo miss; got ok=true img=%v", img.Bounds())
+	}
+}
+
+// BenchmarkFetcher_CachedColdMemoDiskHit measures the worst case the
+// fix targets: 21 distinct (key, target) memo misses where every file
+// is already on disk (cold-start visit to a previously-rendered
+// channel). Pre-fix each call paid open + image.Decode + downscale on
+// the UI thread (~100-200ms per image at typical Slack thumb sizes,
+// summing to multi-second freezes). Post-fix each call is a pure
+// sync.Map miss returning (nil, false) instantly; the caller spawns
+// a background goroutine to do the work.
+func BenchmarkFetcher_CachedColdMemoDiskHit(b *testing.B) {
+	pngBytes := tinyPNG(b, 600, 400, imgcolor.RGBA{255, 0, 0, 255})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "image/png")
+		w.Write(pngBytes)
+	}))
+	defer srv.Close()
+
+	cache, _ := NewCache(b.TempDir(), 100)
+	f := NewFetcher(cache, http.DefaultClient)
+
+	// Pre-populate the disk cache for N distinct keys and FLUSH the
+	// in-memory decoded memo so every Cached() lookup hits the cold
+	// branch the benchmark exercises.
+	const N = 21
+	target := image.Pt(60*8, 16*16) // typical Slack legacy attachment thumb size
+	for i := 0; i < N; i++ {
+		key := keyN(i)
+		if _, err := f.Fetch(context.Background(), FetchRequest{
+			Key: key, URL: srv.URL, Target: target,
+		}); err != nil {
+			b.Fatal(err)
+		}
+	}
+	// We want to measure the COLD path (memo miss + disk decode +
+	// downscale) per iteration, not just the first call. Wipe the
+	// memo before every iteration so each measured call exercises
+	// the cold branch. b.StopTimer / b.StartTimer is used to keep
+	// the wipe out of the measured time.
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		b.StopTimer()
+		f.decoded.Range(func(k, _ any) bool {
+			f.decoded.Delete(k)
+			return true
+		})
+		key := keyN(i % N)
+		b.StartTimer()
+		_, _ = f.Cached(key, target)
+	}
+}
+
+func keyN(i int) string { return "bench-" + string(rune('a'+i%26)) + string(rune('0'+i/26)) }
 
 func TestFetcher_CachedNeverStartsDownload(t *testing.T) {
 	var hits int

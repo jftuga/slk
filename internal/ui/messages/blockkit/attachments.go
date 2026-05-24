@@ -28,6 +28,11 @@ const stripeCol = 2
 // RenderLegacy renders a slice of legacy attachments, each as its
 // own colored card. Attachments are joined with a single blank line
 // between them.
+//
+// Perf: when ctx.Perf is non-nil, per-sub-lane wall-clock is
+// accumulated for the caller (see LegacyPerf in types.go). The
+// instrumentation guards every measurement so the nil path is
+// branch-predicted away in production.
 func RenderLegacy(atts []LegacyAttachment, ctx Context, width int) RenderResult {
 	if len(atts) == 0 || width <= 0 {
 		return RenderResult{}
@@ -38,31 +43,53 @@ func RenderLegacy(atts []LegacyAttachment, ctx Context, width int) RenderResult 
 			out.Lines = append(out.Lines, "")
 		}
 		appendLegacyAttachment(&out, a, ctx, width)
+		if ctx.Perf != nil {
+			ctx.Perf.attachmentCount++
+		}
 	}
 	out.Height = len(out.Lines)
 	return out
 }
 
 // appendLegacyAttachment draws a single legacy attachment onto out.
-// Pretext is rendered above the stripe at full width; title, text,
+// Pretext is rendered above the stripe, full width; title, text,
 // and footer are rendered to the right of the colored stripe at
 // width - stripeCol.
 func appendLegacyAttachment(out *RenderResult, a LegacyAttachment, ctx Context, width int) {
+	perf := ctx.Perf // local alias; nil disables timing
 	// Pretext renders ABOVE the stripe, full width, no indent.
 	if a.Pretext != "" {
+		var t0 time.Time
+		if perf != nil {
+			t0 = time.Now()
+		}
 		out.Lines = append(out.Lines, renderTextLines(a.Pretext, ctx, width)...)
+		if perf != nil {
+			perf.textTotal += time.Since(t0)
+		}
 	}
 
+	var otherT0 time.Time
+	if perf != nil {
+		otherT0 = time.Now()
+	}
 	stripeColor := ResolveAttachmentColor(a.Color)
 	stripeStyle := lipgloss.NewStyle().Foreground(lipgloss.Color(stripeColor))
 	contentW := width - stripeCol
 	if contentW < 1 {
 		contentW = 1
 	}
+	if perf != nil {
+		perf.otherTotal += time.Since(otherT0)
+	}
 
 	// Body lines — title, text, footer. Fields and image_url come in Task 13.
 	var body []string
 	if a.Title != "" {
+		var t0 time.Time
+		if perf != nil {
+			t0 = time.Now()
+		}
 		title := a.Title
 		if a.TitleLink != "" {
 			title = "\x1b]8;;" + a.TitleLink + "\x1b\\" + title + "\x1b]8;;\x1b\\"
@@ -72,13 +99,32 @@ func appendLegacyAttachment(out *RenderResult, a LegacyAttachment, ctx Context, 
 			title = truncateToWidth(title, contentW)
 		}
 		body = append(body, titleStyle.Render(title))
+		if perf != nil {
+			perf.otherTotal += time.Since(t0)
+		}
 	}
 	if a.Text != "" {
+		var t0 time.Time
+		if perf != nil {
+			t0 = time.Now()
+		}
 		body = append(body, renderTextLines(a.Text, ctx, contentW)...)
+		if perf != nil {
+			perf.textTotal += time.Since(t0)
+		}
 	}
-	// Fields grid (Task 13).
+	// Fields grid (Task 13). renderLegacyFields itself fans out to
+	// renderTextLines per field value; we count the whole call as
+	// text-lane work since that's its dominant cost.
 	if len(a.Fields) > 0 {
+		var t0 time.Time
+		if perf != nil {
+			t0 = time.Now()
+		}
 		body = append(body, renderLegacyFields(a.Fields, ctx, contentW)...)
+		if perf != nil {
+			perf.textTotal += time.Since(t0)
+		}
 	}
 	// Inline image (Task 13). Uses the same fetcher path as image
 	// blocks; falls back to a single OSC-8 link line when no fetcher
@@ -86,6 +132,10 @@ func appendLegacyAttachment(out *RenderResult, a LegacyAttachment, ctx Context, 
 	// TODO(blockkit): render thumb_url alongside text via joinSideBySide.
 	var imageHitInBody *HitRect
 	if a.ImageURL != "" {
+		var t0 time.Time
+		if perf != nil {
+			t0 = time.Now()
+		}
 		if ctx.Fetcher == nil || ctx.Protocol == imgpkg.ProtoOff {
 			body = append(body, renderImageFallback(a.ImageURL))
 		} else {
@@ -113,9 +163,16 @@ func appendLegacyAttachment(out *RenderResult, a LegacyAttachment, ctx Context, 
 				body = append(body, renderImageFallback(a.ImageURL))
 			}
 		}
+		if perf != nil {
+			perf.imageTotal += time.Since(t0)
+		}
 	}
 	// Footer.
 	if a.Footer != "" || a.TS != 0 {
+		var t0 time.Time
+		if perf != nil {
+			t0 = time.Now()
+		}
 		footer := a.Footer
 		if a.TS != 0 {
 			ts := time.Unix(a.TS, 0).UTC().Format("2006-01-02 3:04 PM")
@@ -129,13 +186,23 @@ func appendLegacyAttachment(out *RenderResult, a LegacyAttachment, ctx Context, 
 			footer = truncateToWidth(footer, contentW)
 		}
 		body = append(body, mutedStyle().Render(footer))
+		if perf != nil {
+			perf.otherTotal += time.Since(t0)
+		}
 	}
 
 	// Prefix every body line with the colored stripe + 1 col space.
+	var stripeT0 time.Time
+	if perf != nil {
+		stripeT0 = time.Now()
+	}
 	stripe := stripeStyle.Render(stripeGlyph) + " "
 	startRow := len(out.Lines)
 	for _, line := range body {
 		out.Lines = append(out.Lines, stripe+line)
+	}
+	if perf != nil {
+		perf.otherTotal += time.Since(stripeT0)
 	}
 
 	// Adjust the image hit so its rows are absolute within out.Lines

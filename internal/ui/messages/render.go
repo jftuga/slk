@@ -11,7 +11,6 @@ import (
 	"github.com/charmbracelet/x/ansi"
 	emojiutil "github.com/gammons/slk/internal/emoji"
 	"github.com/gammons/slk/internal/ui/styles"
-	"github.com/kyokomi/emoji/v2"
 	"github.com/rivo/uniseg"
 )
 
@@ -559,10 +558,16 @@ func renderInlineFormatting(text string, userNames map[string]string, channelNam
 		return mentionStyle().Render("@" + name)
 	})
 
-	// Emoji shortcodes: :red_circle: -> 🔴
-	// Strip skin-tone modifier suffixes from shortcodes first; toned
-	// emoji render inconsistently across terminals and break alignment.
-	text = emoji.Sprint(emojiutil.StripSkinToneFromText(text))
+	// Emoji shortcodes: :red_circle: -> 🔴, but only when the resolved
+	// Unicode form is composition-safe (single codepoint or VS16-
+	// anchored). ZWJ sequences, flag pairs, and skin-tone modifiers
+	// stay as readable :shortcode: text — they break terminal width
+	// arithmetic on many fonts. See internal/emoji/shouldrender.go.
+	//
+	// StripSkinToneFromText runs first because skin-toned shortcodes
+	// (e.g. :wave_tone3:) should resolve as their base name (:wave:)
+	// rather than be left as literal text.
+	text = emojiutil.ResolveShortcodesInText(emojiutil.StripSkinToneFromText(text))
 
 	return text
 }

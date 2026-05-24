@@ -179,6 +179,22 @@ func reduceChannelSelected(a *App, m ChannelSelectedMsg) tea.Cmd {
 	if a.compose.Uploading() || a.threadCompose.Uploading() {
 		return a.uploadToastCmd("Upload in progress", 2*time.Second)
 	}
+	// Perf instrumentation: wall-clock the synchronous portion of the
+	// channel-switch reducer. This covers everything up to and including
+	// the tier decision, but NOT the subsequent View() (which triggers
+	// messages.buildCache / sidebar.buildCache and is already instrumented
+	// separately). The big synchronous cost inside this arm is
+	// a.channels.ReadCache -> loadCachedMessages's SQLite N+1; the
+	// loadCachedMessages [perf] line will attribute that.
+	var perfStart time.Time
+	var tier string
+	if debuglog.Enabled() {
+		perfStart = time.Now()
+		defer func() {
+			debuglog.Perf("reduceChannelSelected channel=%s name=%q tier=%s total=%s",
+				m.ID, m.Name, tier, time.Since(perfStart))
+		}()
+	}
 	a.cancelEdit()
 	// Picking a channel always exits the Threads view.
 	a.view = ViewChannels
@@ -264,6 +280,7 @@ func reduceChannelSelected(a *App, m ChannelSelectedMsg) tea.Cmd {
 		a.messagepane.SetMessages(cached)
 		a.statusbar.SetSyncing(false)
 		debuglog.Cache("ChannelSelectedMsg: channel=%s tier=1_fresh", m.ID)
+		tier = "1_fresh"
 		if len(cached) == 0 {
 			return nil
 		}
@@ -284,6 +301,7 @@ func reduceChannelSelected(a *App, m ChannelSelectedMsg) tea.Cmd {
 		a.messagepane.SetMessages(cached)
 		a.statusbar.SetSyncing(true)
 		debuglog.Cache("ChannelSelectedMsg: channel=%s tier=2_verify", m.ID)
+		tier = "2_verify"
 		return fetchCmd()
 
 	default:
@@ -293,6 +311,7 @@ func reduceChannelSelected(a *App, m ChannelSelectedMsg) tea.Cmd {
 		a.messagepane.SetMessages(nil)
 		a.statusbar.SetSyncing(false)
 		debuglog.Cache("ChannelSelectedMsg: channel=%s tier=3_spinner", m.ID)
+		tier = "3_spinner"
 		return tea.Batch(spinnerTickCmd(), fetchCmd())
 	}
 }

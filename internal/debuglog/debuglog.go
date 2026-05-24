@@ -13,6 +13,7 @@
 //   - ImgRender — image render sizing + protocol decisions
 //   - WS        — websocket events
 //   - Backfill  — reconnect-driven history backfill
+//   - Perf      — render/cache timing for perf investigation
 //   - General   — misc / catch-all
 //
 // All output goes to a single file. Categories are encoded as inline
@@ -125,6 +126,18 @@ func WS(format string, args ...any) {
 		return
 	}
 	logger.Printf("[ws] "+format, args...)
+}
+
+// Perf logs a message tagged [perf] for render/cache timing events
+// emitted from the UI hot path (View, buildCache, SetFocused). No-op
+// when !Enabled(). Intended for ad-hoc perf investigation: keep call
+// sites cheap (atomic load + early return) so leaving them in place
+// in production builds has no measurable cost when SLK_DEBUG is unset.
+func Perf(format string, args ...any) {
+	if !enabled.Load() {
+		return
+	}
+	logger.Printf("[perf] "+format, args...)
 }
 
 // General logs a message tagged [general] for miscellaneous events.

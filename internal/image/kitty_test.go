@@ -177,3 +177,144 @@ func minInt(a, b int) int {
 	}
 	return b
 }
+
+// BenchmarkKitty_RenderKeyWarm measures the steady-state cost of
+// RenderKey for an already-uploaded (key, target) -- the path that
+// dominates buildCache in image-heavy channels. Pre-fix this was
+// ~16ms/op on typical kitty terminals because buildPlaceholderLines
+// re-ran cells.Y * cells.X strings.Builder writes per call. Post-fix
+// (placeholder-line memoization) it should be a single map lookup.
+//
+// We pre-flush so the registry marks the image uploaded; subsequent
+// RenderKey calls hit the "fresh=false" branch -- which still ran
+// buildPlaceholderLines before the fix.
+func BenchmarkKitty_RenderKeyWarm(b *testing.B) {
+	t := image.Pt(60, 20)
+	src := makeSolid(60*8, 20*16, imgcolor.RGBA{1, 2, 3, 255})
+	r := NewKittyRenderer(NewRegistry())
+	r.SetSource("bench", src)
+
+	// First call returns OnFlush; emit it so the registry marks the
+	// image uploaded. Subsequent calls hit the warm path.
+	first := r.RenderKey("bench", t)
+	if first.OnFlush != nil {
+		_ = first.OnFlush(&bytes.Buffer{})
+	}
+
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		_ = r.RenderKey("bench", t)
+	}
+}
+
+// BenchmarkKitty_RenderKeyFreshRepeat exercises the path that
+// dominates real-world channel-switch latency: an image whose
+// OnFlush has not yet fired (off-screen viewEntries) so
+// Registry.Lookup keeps returning fresh=true. Pre-fix every call
+// re-ran bilinear-resize + PNG-encode + base64. Post-fix the
+// payload cache should make these calls effectively free.
+func BenchmarkKitty_RenderKeyFreshRepeat(b *testing.B) {
+	t := image.Pt(60, 16)
+	// 8x16 pixels per cell -> 480x256 source roughly matches a
+	// typical Slack attachment thumbnail target.
+	src := makeSolid(60*8, 16*16, imgcolor.RGBA{1, 2, 3, 255})
+	r := NewKittyRenderer(NewRegistry())
+	r.SetSource("bench-fresh", src)
+	// Do NOT call OnFlush; this simulates an off-screen viewEntry
+	// whose flush was never invoked. Subsequent RenderKey calls
+	// will see fresh=true on every iteration.
+	_ = r.RenderKey("bench-fresh", t)
+
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		_ = r.RenderKey("bench-fresh", t)
+	}
+}
+
+// TestKitty_RenderKeyWarmMatchesCold guards the placeholder-line
+// memoization: the cached output must be byte-identical to the
+// freshly-computed output for the same (id, target).
+func TestKitty_RenderKeyWarmMatchesCold(t *testing.T) {
+	target := image.Pt(8, 4)
+	src := makeSolid(64, 64, imgcolor.RGBA{1, 2, 3, 255})
+	r := NewKittyRenderer(NewRegistry())
+	r.SetSource("k", src)
+
+	cold := r.RenderKey("k", target)
+	if cold.OnFlush != nil {
+		_ = cold.OnFlush(&bytes.Buffer{}) // mark uploaded
+	}
+	warm := r.RenderKey("k", target)
+
+	if len(cold.Lines) != len(warm.Lines) {
+		t.Fatalf("line count differs: cold=%d warm=%d", len(cold.Lines), len(warm.Lines))
+	}
+	for i := range cold.Lines {
+		if cold.Lines[i] != warm.Lines[i] {
+			t.Errorf("line %d differs:\n cold=%q\n warm=%q", i, cold.Lines[i], warm.Lines[i])
+		}
+	}
+	if cold.ID != warm.ID {
+		t.Errorf("ID differs: cold=%d warm=%d", cold.ID, warm.ID)
+	}
+}
+
+// TestKitty_PayloadCacheUploadIdentity guards the payload memoization:
+// when fresh=true is returned for the same (id, target) multiple times
+// (the off-screen viewEntry case), each OnFlush invocation must emit
+// byte-identical APC upload bytes. The first call's OnFlush runs the
+// expensive resize+encode; subsequent calls reuse the cached payload.
+// Without this guarantee, repeated cache rebuilds for the same image
+// could produce divergent uploads and leave the terminal pointing at
+// stale image data.
+//
+// We deliberately do NOT call MarkUploaded between the two RenderKey
+// calls (i.e. we DO NOT invoke first.OnFlush). This is the exact path
+// the bug fixes: an off-screen image whose OnFlush was never consumed
+// by the visible-entry loop, then re-rendered on the next buildCache.
+func TestKitty_PayloadCacheUploadIdentity(t *testing.T) {
+	t.Setenv("TMUX", "")
+	target := image.Pt(10, 6)
+	src := makeSolid(80, 96, imgcolor.RGBA{200, 100, 50, 255})
+	r := NewKittyRenderer(NewRegistry())
+	r.SetSource("payload-test", src)
+
+	first := r.RenderKey("payload-test", target)
+	if first.OnFlush == nil {
+		t.Fatal("first call: expected OnFlush set when fresh=true")
+	}
+	var firstBuf bytes.Buffer
+	if err := first.OnFlush(&firstBuf); err != nil {
+		t.Fatal(err)
+	}
+
+	// Note: we do NOT call MarkUploaded explicitly. The first OnFlush
+	// did call it via the registry, so Lookup will now return
+	// fresh=false. To force fresh=true again (the off-screen case),
+	// use a different (key, target) bound to a different id but
+	// reuse the source image -- this exercises the payload cache
+	// path because the second call still goes through the
+	// resize+encode branch with a fresh id.
+	//
+	// Simpler and more direct: hand-craft the off-screen scenario by
+	// reaching past MarkUploaded via a fresh renderer where we never
+	// drain OnFlush. Each fresh=true call must reuse the cached
+	// payload for the SAME (id, target).
+	r2 := NewKittyRenderer(NewRegistry())
+	r2.SetSource("payload-test", src)
+	a := r2.RenderKey("payload-test", target)
+	b := r2.RenderKey("payload-test", target)
+	if a.OnFlush == nil || b.OnFlush == nil {
+		t.Fatal("both off-screen calls: expected OnFlush set when fresh=true")
+	}
+	var aBuf, bBuf bytes.Buffer
+	if err := a.OnFlush(&aBuf); err != nil {
+		t.Fatal(err)
+	}
+	if err := b.OnFlush(&bBuf); err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(aBuf.Bytes(), bBuf.Bytes()) {
+		t.Errorf("upload bytes differ between consecutive fresh=true calls\nlen a=%d b=%d", aBuf.Len(), bBuf.Len())
+	}
+}

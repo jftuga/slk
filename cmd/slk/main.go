@@ -2185,6 +2185,20 @@ func markChannelReadAsync(
 // raw_json unmarshal failures on a single row degrade gracefully: that
 // row renders as text-only (no attachments / blocks / legacy
 // attachments) without aborting the rest of the load.
+// enrichPerfStats accumulates per-sub-call timing across one
+// loadCachedMessages invocation so the [perf] log can attribute the
+// channel-open hot path's cost across the three known N+1 sources.
+// Allocated only when debuglog.Enabled(); enrichCachedRow checks for
+// nil and skips the time.Now() / time.Since() calls otherwise.
+type enrichPerfStats struct {
+	getUserCalls    int
+	getUserTotal    time.Duration
+	getReactCalls   int
+	getReactTotal   time.Duration
+	unmarshalCalls  int
+	unmarshalTotal  time.Duration
+}
+
 func loadCachedMessages(
 	db *cache.DB,
 	selfUserID string,
@@ -2198,7 +2212,24 @@ func loadCachedMessages(
 		return nil
 	}
 	debuglog.Cache("loadCachedMessages: channel=%s entry", channelID)
+
+	// Perf instrumentation: wall-clock the whole call and attribute the
+	// loop cost across GetReactions / GetUser / json.Unmarshal so we can
+	// tell which N+1 dominates the channel-open hot path. Gated on
+	// debuglog.Enabled() (atomic.Bool load -> zero cost when SLK_DEBUG
+	// is unset). The TODO at the GetReactions callsite below predicts
+	// GetReactions as the dominant cost; this trace will confirm or
+	// refute it.
+	var perfStart time.Time
+	var stats *enrichPerfStats
+	if debuglog.Enabled() {
+		perfStart = time.Now()
+		stats = &enrichPerfStats{}
+	}
+
+	getMsgsStart := time.Now()
 	rows, err := db.GetMessages(channelID, 50, "")
+	getMsgsDur := time.Since(getMsgsStart)
 	if err != nil {
 		debuglog.Cache("loadCachedMessages: GetMessages %s: %v", channelID, err)
 		return nil
@@ -2210,9 +2241,16 @@ func loadCachedMessages(
 
 	out := make([]messages.MessageItem, 0, len(rows))
 	for _, m := range rows {
-		out = append(out, enrichCachedRow(db, selfUserID, channelID, m, userNames, tsFormat, "loadCachedMessages", router))
+		out = append(out, enrichCachedRow(db, selfUserID, channelID, m, userNames, tsFormat, "loadCachedMessages", router, stats))
 	}
 	debuglog.Cache("loadCachedMessages: channel=%s result %s", channelID, summarizeMessages(out))
+	if stats != nil {
+		debuglog.Perf("loadCachedMessages channel=%s N=%d total=%s GetMessages=%s GetReactions(n=%d)=%s GetUser(n=%d)=%s json.Unmarshal(n=%d)=%s",
+			channelID, len(rows), time.Since(perfStart), getMsgsDur,
+			stats.getReactCalls, stats.getReactTotal,
+			stats.getUserCalls, stats.getUserTotal,
+			stats.unmarshalCalls, stats.unmarshalTotal)
+	}
 	return out
 }
 
@@ -2238,6 +2276,7 @@ func enrichCachedRow(
 	tsFormat string,
 	logPrefix string,
 	router *workspaceRouter,
+	stats *enrichPerfStats,
 ) messages.MessageItem {
 	// Resolve username from the in-memory map first; fall back to
 	// the cached users table; finally fall back to the user ID
@@ -2247,7 +2286,16 @@ func enrichCachedRow(
 		userName = userNames[m.UserID]
 	}
 	if userName == "" && m.UserID != "" {
-		if u, err := db.GetUser(m.UserID); err == nil {
+		var t0 time.Time
+		if stats != nil {
+			t0 = time.Now()
+		}
+		u, err := db.GetUser(m.UserID)
+		if stats != nil {
+			stats.getUserCalls++
+			stats.getUserTotal += time.Since(t0)
+		}
+		if err == nil {
 			if u.DisplayName != "" {
 				userName = u.DisplayName
 			} else if u.Name != "" {
@@ -2275,7 +2323,16 @@ func enrichCachedRow(
 	// TODO(perf): N+1 query — for 50 messages this is 50 SQLite calls on the
 	// channel-open hot path. If this becomes a bottleneck, add a batched
 	// db.GetReactionsForMessages([]ts) map[ts][]ReactionRow to the cache layer.
-	if rs, err := db.GetReactions(m.TS, channelID); err == nil {
+	var reactT0 time.Time
+	if stats != nil {
+		reactT0 = time.Now()
+	}
+	rs, reactErr := db.GetReactions(m.TS, channelID)
+	if stats != nil {
+		stats.getReactCalls++
+		stats.getReactTotal += time.Since(reactT0)
+	}
+	if reactErr == nil {
 		for _, r := range rs {
 			hasReacted := false
 			for _, uid := range r.UserIDs {
@@ -2291,7 +2348,7 @@ func enrichCachedRow(
 			})
 		}
 	} else {
-		debuglog.Cache("%s: GetReactions %s/%s: %v", logPrefix, channelID, m.TS, err)
+		debuglog.Cache("%s: GetReactions %s/%s: %v", logPrefix, channelID, m.TS, reactErr)
 	}
 
 	// Attachments / blocks / legacy attachments come from
@@ -2302,7 +2359,16 @@ func enrichCachedRow(
 	var legacy []blockkit.LegacyAttachment
 	if m.RawJSON != "" {
 		var raw slack.Message
-		if err := json.Unmarshal([]byte(m.RawJSON), &raw); err != nil {
+		var unmarshalT0 time.Time
+		if stats != nil {
+			unmarshalT0 = time.Now()
+		}
+		err := json.Unmarshal([]byte(m.RawJSON), &raw)
+		if stats != nil {
+			stats.unmarshalCalls++
+			stats.unmarshalTotal += time.Since(unmarshalT0)
+		}
+		if err != nil {
 			debuglog.Cache("%s: raw_json unmarshal for %s/%s: %v",
 				logPrefix, channelID, m.TS, err)
 		} else {
@@ -2364,7 +2430,7 @@ func loadCachedThreadReplies(
 
 	out := make([]messages.MessageItem, 0, len(rows))
 	for _, m := range rows {
-		out = append(out, enrichCachedRow(db, selfUserID, channelID, m, userNames, tsFormat, "loadCachedThreadReplies", router))
+		out = append(out, enrichCachedRow(db, selfUserID, channelID, m, userNames, tsFormat, "loadCachedThreadReplies", router, nil))
 	}
 	debuglog.Cache("loadCachedThreadReplies: channel=%s thread_ts=%s result %s",
 		channelID, threadTS, summarizeMessages(out))

@@ -58,7 +58,7 @@ func (m *Model) buildEmojiList() {
 			continue
 		}
 		seen[name] = true
-		m.allEmoji = append(m.allEmoji, EmojiEntry{Name: name, Unicode: unicode})
+		m.allEmoji = append(m.allEmoji, EmojiEntry{Name: name, Unicode: strings.TrimRight(unicode, " ")})
 	}
 
 	sort.Slice(m.allEmoji, func(i, j int) bool {
@@ -337,14 +337,14 @@ func (m *Model) renderBox(termWidth int) string {
 	var resultRows []string
 	for i := start; i < end; i++ {
 		entry := list[i]
-		// Display Unicode emoji only for single-codepoint characters.
-		// Multi-codepoint emoji (skin tones, ZWJ sequences, flags) have
-		// terminal widths that disagree with go-runewidth, breaking borders.
-		// runewidth.StringWidth() is unreliable for these — it returns 2
-		// for skin tone variants that render as 4 cells. Rune count is
-		// the reliable signal: 1 rune = predictable width, 2+ = problematic.
+		// Display Unicode emoji when the resolved form is composition-
+		// safe (single base codepoint, optionally + VS16). Multi-
+		// codepoint sequences (ZWJ, regional-indicator flags, skin
+		// tones) render as broken glyphs in many terminal fonts and
+		// corrupt the picker's width arithmetic. See
+		// internal/emoji/shouldrender.go.
 		var line string
-		if len([]rune(entry.Unicode)) == 1 {
+		if slkemoji.ShouldRenderUnicode(entry.Unicode) {
 			line = entry.Unicode + " " + entry.Name
 		} else {
 			line = ":" + entry.Name + ":"

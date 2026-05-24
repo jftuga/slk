@@ -29,13 +29,28 @@ var kittyPlaceholderPrefix = string(image.PlaceholderRune)
 // frame re-emits the placeholder cells, re-creating the placement
 // without any image-state plumbing. Issue #18.
 func DimmedOverlay(width, height int, background string, box string, dimPercent float64) string {
-	// Step 1: Render background to canvas and dim all cells
+	// Step 1: Render background to canvas and dim all cells.
+	//
+	// Wide characters (emoji, CJK) need two pieces of care:
+	//
+	//   1. Continuation cells (Width==0 at column X+1 after a wide
+	//      char at column X) are layout placeholders, not real
+	//      content; skip them so we don't redundantly process them.
+	//
+	//   2. lipgloss's canvas has a quirk where calling SetCell(x, y,
+	//      cell) on a wide-char position that ALREADY contains that
+	//      wide char destroys the glyph (the canvas seems to drop the
+	//      preserved continuation column). CellAt returns a live
+	//      pointer into the canvas's internal cell storage, so
+	//      mutating cell.Style.{Bg,Fg} in-place propagates without
+	//      any SetCell call — and avoids the wide-char drop. Use that
+	//      path here; do not call SetCell.
 	canvas := lipgloss.NewCanvas(width, height)
 	canvas.Compose(lipgloss.NewLayer(background))
 	for y := 0; y < height; y++ {
 		for x := 0; x < width; x++ {
 			cell := canvas.CellAt(x, y)
-			if cell == nil {
+			if cell == nil || cell.Width == 0 {
 				continue
 			}
 			if strings.HasPrefix(cell.Content, kittyPlaceholderPrefix) {
@@ -53,7 +68,7 @@ func DimmedOverlay(width, height int, background string, box string, dimPercent 
 			if cell.Style.Fg != nil {
 				cell.Style.Fg = lipgloss.Darken(cell.Style.Fg, dimPercent)
 			}
-			canvas.SetCell(x, y, cell)
+			// Intentionally NO canvas.SetCell here — see comment above.
 		}
 	}
 
@@ -77,13 +92,23 @@ func DimmedOverlay(width, height int, background string, box string, dimPercent 
 	modalCanvas := lipgloss.NewCanvas(modalW, modalH)
 	modalCanvas.Compose(lipgloss.NewLayer(box))
 
-	// Step 4: Copy modal cells onto output canvas
+	// Step 4: Copy modal cells onto output canvas.
+	//
+	// Wide characters (emoji, CJK) occupy two grid columns. lipgloss's
+	// canvas reports the wide cell at column X with Width=2 and a
+	// CONTINUATION cell at column X+1 with Content="" Width=0. The
+	// continuation cell is a layout placeholder, not real content;
+	// calling SetCell on it would overwrite the second column of the
+	// wide glyph with empty content, erasing the emoji visually.
+	// Skip Width==0 cells so the wide character that already landed
+	// at column X stays intact across both of its columns.
 	for my := 0; my < modalH; my++ {
 		for mx := 0; mx < modalW; mx++ {
 			cell := modalCanvas.CellAt(mx, my)
-			if cell != nil {
-				outCanvas.SetCell(startX+mx, startY+my, cell)
+			if cell == nil || cell.Width == 0 {
+				continue
 			}
+			outCanvas.SetCell(startX+mx, startY+my, cell)
 		}
 	}
 

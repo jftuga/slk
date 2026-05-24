@@ -8,6 +8,7 @@ import (
 
 	"charm.land/lipgloss/v2"
 	"github.com/gammons/slk/internal/cache"
+	"github.com/gammons/slk/internal/debuglog"
 	"github.com/gammons/slk/internal/text"
 	"github.com/gammons/slk/internal/ui/messages"
 	"github.com/gammons/slk/internal/ui/styles"
@@ -823,6 +824,19 @@ func (m *Model) SelectByID(id string) {
 }
 
 func (m *Model) rebuildFilter() {
+	// Perf instrumentation: rebuildFilter calls readStateReader (a
+	// synchronous SQLite GetWorkspaceReadState) and runs a sort over the
+	// channel list. It's called on every channel switch via
+	// SetActiveChannelID -- one of two readStateReader hits per switch
+	// (the other is inside buildCache). SLK_DEBUG-gated.
+	var perfStart time.Time
+	if debuglog.Enabled() {
+		perfStart = time.Now()
+		defer func() {
+			debuglog.Perf("sidebar.rebuildFilter items=%d filtered=%d took=%s",
+				len(m.items), len(m.filtered), time.Since(perfStart))
+		}()
+	}
 	m.filtered = nil
 	lower := text.Fold(m.filter)
 	now := m.now()
@@ -1019,6 +1033,19 @@ type renderRow struct {
 // row.navIdx == nav index. View() uses this to find the selected line
 // and to substitute the "selected" variant in O(1).
 func (m *Model) buildCache(width int) {
+	// Perf instrumentation: buildCache walks m.nav, calls readStateReader
+	// (second SQLite GetWorkspaceReadState per channel switch), and
+	// produces a styled row per visible item. Called on every channel
+	// switch via View() after the cache is invalidated by
+	// SetActiveChannelID. SLK_DEBUG-gated.
+	var perfStart time.Time
+	if debuglog.Enabled() {
+		perfStart = time.Now()
+		defer func() {
+			debuglog.Perf("sidebar.buildCache width=%d items=%d nav=%d rows=%d took=%s",
+				width, len(m.items), len(m.nav), len(m.cacheRows), time.Since(perfStart))
+		}()
+	}
 	m.cacheValid = true
 	m.cacheWidth = width
 	m.cacheRows = m.cacheRows[:0]
