@@ -605,21 +605,34 @@ func (f *Fetcher) Bytes(key string) ([]byte, error) {
 	return os.ReadFile(path)
 }
 
-// Cached returns the decoded image and true if it's already in the on-disk
-// cache. Never starts a network download. When target is positive on both
-// axes, the returned image is downscaled to those pixel dimensions; pass
-// image.Point{} (zero) to skip downscale.
+// Cached returns the decoded image and true if and only if a memo
+// entry for (key, target) is already in memory. Pure sync.Map lookup;
+// never touches the disk, never starts a network download, never
+// blocks on decode or downscale.
 //
-// Decoded results are memoized per (key, target) so repeated calls
-// don't re-decode the on-disk PNG and re-bilinear downscale on every
-// hit. The memo is invalidated when the cache file is evicted (via
-// Cache.Delete or LRU eviction); a future cache rebuild that finds
-// the file gone falls back through the disk path and re-populates.
+// Callers that need to render an image whose memo is cold MUST spawn
+// a Fetch goroutine (see fetcher.Fetch / blockkit.fetchOrPlaceholder /
+// imgrender.RenderBlock) and render a placeholder until the resulting
+// ready-message lands and triggers a render-cache invalidation. The
+// Fetch path handles the disk-cache hit case: when the file is
+// already on disk, Fetch skips the HTTP semaphore (fetcher.go:226)
+// and goes straight to decode + memo populate.
 //
-// If a file is found but fails to decode (e.g., a stale auth-failure HTML
-// response was persisted under an image extension), the entry is evicted
-// from the cache and the caller is told it's not present, so a subsequent
-// Fetch re-downloads.
+// This contract changed in May 2026 to fix a 3+ second freeze on the
+// first channel visit of a new session: the previous behavior would
+// open + image.Decode + downscale synchronously on the bubbletea
+// Update goroutine for every memo miss with a disk hit -- ~100-200ms
+// per image at typical Slack thumbnail sizes, summing to multi-second
+// stalls on image-heavy channels. The async Fetch path that callers
+// now drive achieves the same end state (decoded image memoized)
+// without blocking the UI thread.
+//
+// The memo is populated by fetcher.Fetch (fetcher.go:314). When the
+// underlying cache file is evicted (Cache.Delete or LRU eviction),
+// stale memo entries may remain; callers see the stale image until
+// a subsequent Fetch overwrites the entry. For our use case this is
+// acceptable -- image-cache evictions are rare and the rendered
+// content is content-addressable so a stale render is still correct.
 func (f *Fetcher) Cached(key string, target image.Point) (image.Image, bool) {
 	memoKey := decodedMemoKey(key, target)
 	if v, ok := f.decoded.Load(memoKey); ok {
@@ -627,27 +640,7 @@ func (f *Fetcher) Cached(key string, target image.Point) (image.Image, bool) {
 			return img, true
 		}
 	}
-	path, ok := f.cache.Get(key)
-	if !ok {
-		return nil, false
-	}
-	file, err := os.Open(path)
-	if err != nil {
-		return nil, false
-	}
-	defer file.Close()
-	img, _, err := image.Decode(file)
-	if err != nil {
-		file.Close()
-		f.cache.Delete(key)
-		f.decoded.Delete(memoKey)
-		return nil, false
-	}
-	if target.X > 0 && target.Y > 0 {
-		img = downscale(img, target)
-	}
-	f.decoded.Store(memoKey, img)
-	return img, true
+	return nil, false
 }
 
 func decodedMemoKey(key string, target image.Point) string {

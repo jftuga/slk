@@ -3,6 +3,7 @@ package messages
 
 import (
 	"bytes"
+	"context"
 	stdimage "image"
 	imgcolor "image/color"
 	imgpng "image/png"
@@ -373,9 +374,24 @@ func TestImageReady_DoesNotChangeMessageHeight(t *testing.T) {
 }
 
 // setupImageMessageModel builds a Model with a single image-bearing
-// message whose bytes are pre-staged in the on-disk cache. Returns the
-// model configured with the given protocol; the image is fully cached so
-// the first View() will take the rendered (not placeholder) path.
+// message whose bytes are pre-staged in the on-disk cache AND the
+// in-memory decoded memo. The memo prime is required because
+// Fetcher.Cached is now memo-only (it no longer falls back to disk
+// decode -- see fetcher.go:Cached docstring); without priming the
+// memo, the first View() would render the loading placeholder
+// instead of the actual image and the byte-presence assertions
+// downstream would fail.
+//
+// Memo prime is done via a synchronous Fetch call: Fetch's
+// disk-cache check (fetcher.go:226) sees the byte we just put,
+// skips the HTTP semaphore, decodes + downscales + memoizes. The
+// URL is unused on the disk-hit path so any placeholder URL works.
+//
+// pixelTarget is derived from the same computation the renderer
+// will use at View(60, 80) given the test's static parameters
+// (CellPixels=(8,16), MaxRows=20, no MaxCols, single 720x720 thumb,
+// contentWidth = 80 - 4 = 76). computeImageTarget yields
+// (40, 20) cells -> (320, 320) pixels for a square thumb.
 func setupImageMessageModel(t *testing.T, protocol imgpkg.Protocol) *Model {
 	t.Helper()
 	cache, err := imgpkg.NewCache(t.TempDir(), 10)
@@ -384,9 +400,21 @@ func setupImageMessageModel(t *testing.T, protocol imgpkg.Protocol) *Model {
 	}
 	fetcher := imgpkg.NewFetcher(cache, nil)
 	const fileID = "F0123ABCD"
+	const key = fileID + "-720"
 	pngBytes := makeTestPNG(720, 720)
-	if _, err := cache.Put(fileID+"-720", "png", pngBytes); err != nil {
+	if _, err := cache.Put(key, "png", pngBytes); err != nil {
 		t.Fatalf("cache.Put: %v", err)
+	}
+	// Prime the in-memory decoded memo via Fetch. Fetch's singleflight
+	// + disk-cache check skips the network when the bytes are already
+	// on disk; we just need the decoded image to live in fetcher.decoded
+	// so the renderer's Cached() lookup hits.
+	if _, err := fetcher.Fetch(context.Background(), imgpkg.FetchRequest{
+		Key:    key,
+		URL:    "unused://disk-cache-hits-skip-network",
+		Target: stdimage.Pt(320, 320),
+	}); err != nil {
+		t.Fatalf("Fetch (memo prime): %v", err)
 	}
 	msg := MessageItem{
 		TS:        "1700000000.000100",
