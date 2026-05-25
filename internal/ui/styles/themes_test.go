@@ -187,3 +187,44 @@ func TestANSIDarkThemeRegistered(t *testing.T) {
 		}
 	}
 }
+
+// TestANSILightThemeRegistered: mirror of TestANSIDarkThemeRegistered
+// for the light variant.
+func TestANSILightThemeRegistered(t *testing.T) {
+	names := ThemeNames()
+	found := false
+	for _, n := range names {
+		if n == "ANSI Light" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("expected \"ANSI Light\" in ThemeNames, got %v", names)
+	}
+
+	c := lookupTheme("ansi-light")
+	required := map[string]string{
+		"Primary":     c.Primary,
+		"Accent":      c.Accent,
+		"Warning":     c.Warning,
+		"Error":       c.Error,
+		"Background":  c.Background,
+		"Surface":     c.Surface,
+		"SurfaceDark": c.SurfaceDark,
+		"Text":        c.Text,
+		"TextMuted":   c.TextMuted,
+		"Border":      c.Border,
+	}
+	for name, val := range required {
+		if val == "" {
+			t.Errorf("ansi-light.%s is empty", name)
+			continue
+		}
+		col := lipgloss.Color(val)
+		if _, ok := col.(ansi.BasicColor); !ok {
+			t.Errorf("ansi-light.%s = %q resolves to %T, want ansi.BasicColor",
+				name, val, col)
+		}
+	}
+}

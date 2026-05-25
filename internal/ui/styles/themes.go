@@ -286,6 +286,14 @@ var builtinThemes = map[string]struct {
 		Background: "0", Surface: "8", SurfaceDark: "0",
 		Text: "15", TextMuted: "8", Border: "8",
 	}},
+	// ansi-light is the light-terminal counterpart to ansi-dark. Same
+	// ANSI-16-only constraint; values chosen for readability on light
+	// terminal backgrounds.
+	"ansi-light": {"ANSI Light", ThemeColors{
+		Primary: "4", Accent: "6", Warning: "3", Error: "1",
+		Background: "15", Surface: "7", SurfaceDark: "7",
+		Text: "0", TextMuted: "8", Border: "8",
+	}},
 }
 
 // customThemes stores themes loaded from the user's themes directory.
