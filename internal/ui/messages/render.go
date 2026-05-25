@@ -345,6 +345,141 @@ func bgSGRParams(ansi string) string {
 	return ansi[len(prefix) : len(ansi)-len(suffix)]
 }
 
+// substituteBgSGR walks s, finds every SGR sequence (\x1b[...m), tokenizes
+// its parameter list with awareness of extended-color groups (38;5;N,
+// 38;2;R;G;B, 48;5;N, 48;2;R;G;B), and substitutes any bg-token whose
+// stringified form equals from with to. Non-SGR text and SGR sequences
+// that don't contain a matching bg token are passed through unchanged.
+//
+// Grammar awareness matters because a bg token can be a single param
+// ("40"–"47", "100"–"107") that may otherwise collide with arbitrary
+// digit substrings — both inside non-SGR content and as arguments to
+// 256-color FG codes like "38;5;40". Splitting on ";" without grammar
+// knowledge would corrupt those.
+//
+// If from == to the input is returned unchanged.
+func substituteBgSGR(s, from, to string) string {
+	if from == "" || from == to {
+		return s
+	}
+	var b strings.Builder
+	b.Grow(len(s))
+	i := 0
+	for i < len(s) {
+		start := strings.Index(s[i:], "\x1b[")
+		if start < 0 {
+			b.WriteString(s[i:])
+			break
+		}
+		// Copy plain text before the escape verbatim.
+		b.WriteString(s[i : i+start])
+		seqStart := i + start
+		// Find the terminating 'm'. SGR parameters are digits and ';';
+		// anything else (e.g. another '\x1b') means this isn't a well-formed
+		// SGR sequence and we bail back to plain copy.
+		j := seqStart + 2
+		for j < len(s) && s[j] != 'm' {
+			c := s[j]
+			if c != ';' && (c < '0' || c > '9') {
+				break
+			}
+			j++
+		}
+		if j >= len(s) || s[j] != 'm' {
+			// Not an SGR; copy "\x1b[" and continue scanning past it.
+			b.WriteString("\x1b[")
+			i = seqStart + 2
+			continue
+		}
+		// s[seqStart+2:j] is the param list, s[j] == 'm'.
+		params := splitSGRParams(s[seqStart+2 : j])
+		out := make([]string, 0, len(params))
+		for _, p := range params {
+			if p.isBg && p.text == from {
+				out = append(out, to)
+			} else {
+				out = append(out, p.text)
+			}
+		}
+		b.WriteString("\x1b[")
+		b.WriteString(strings.Join(out, ";"))
+		b.WriteString("m")
+		i = j + 1
+	}
+	return b.String()
+}
+
+// sgrParam is one logical SGR parameter. For extended-color groups
+// (38;5;N, 38;2;R;G;B, 48;5;N, 48;2;R;G;B) text contains the joined
+// form (e.g. "48;5;40" or "48;2;26;26;46") and isBg is true for any
+// bg variant. For single parameters text is just the number (e.g.
+// "40", "1", "31") and isBg is true only when the number is in the
+// basic bg range (40–47, 100–107).
+type sgrParam struct {
+	text string
+	isBg bool
+}
+
+// splitSGRParams tokenizes an SGR parameter list with awareness of
+// extended-color sub-sequences so a "40" appearing as an argument to
+// "38;5" is not mistaken for a standalone bg-black token.
+func splitSGRParams(params string) []sgrParam {
+	if params == "" {
+		return nil
+	}
+	parts := strings.Split(params, ";")
+	out := make([]sgrParam, 0, len(parts))
+	for i := 0; i < len(parts); i++ {
+		p := parts[i]
+		switch p {
+		case "38", "48":
+			isBg := p == "48"
+			// Look ahead for "5;N" or "2;R;G;B".
+			if i+1 < len(parts) {
+				switch parts[i+1] {
+				case "5":
+					if i+2 < len(parts) {
+						out = append(out, sgrParam{
+							text: strings.Join(parts[i:i+3], ";"),
+							isBg: isBg,
+						})
+						i += 2
+						continue
+					}
+				case "2":
+					if i+4 < len(parts) {
+						out = append(out, sgrParam{
+							text: strings.Join(parts[i:i+5], ";"),
+							isBg: isBg,
+						})
+						i += 4
+						continue
+					}
+				}
+			}
+			// Malformed — treat as a bare param so we don't drop data.
+			out = append(out, sgrParam{text: p, isBg: false})
+		default:
+			out = append(out, sgrParam{
+				text: p,
+				isBg: isBasicBgParam(p),
+			})
+		}
+	}
+	return out
+}
+
+// isBasicBgParam reports whether s is a single SGR parameter representing
+// a basic 16-color background: "40"–"47" or "100"–"107".
+func isBasicBgParam(s string) bool {
+	switch s {
+	case "40", "41", "42", "43", "44", "45", "46", "47",
+		"100", "101", "102", "103", "104", "105", "106", "107":
+		return true
+	}
+	return false
+}
+
 // bgANSIFor returns the ANSI background-color escape for c.
 // For ansi.BasicColor it emits the native 16-color SGR (\x1b[40m–\x1b[47m,
 // \x1b[100m–\x1b[107m) so the user's terminal palette is honored.

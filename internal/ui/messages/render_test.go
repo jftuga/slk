@@ -530,3 +530,91 @@ func TestBgFgANSIForBasicColorOutOfRange(t *testing.T) {
 		t.Errorf("out-of-range BasicColor fg should fall through to truecolor, got %q", fg)
 	}
 }
+
+// TestSubstituteBgSGR exercises the grammar-aware bg-parameter
+// substitution. The helper must:
+//   (1) substitute the param when it stands alone (\x1b[40m)
+//   (2) substitute the param within a bundled SGR (\x1b[1;31;40m)
+//   (3) NOT corrupt literal digits in non-SGR content
+//   (4) NOT match the param value inside a 256-color sub-argument
+//       (\x1b[38;5;40m is an FG index 40, not a bg basic 40)
+//   (5) leave the string unchanged when from == to
+func TestSubstituteBgSGR(t *testing.T) {
+	const to = "48;2;100;100;200"
+
+	cases := []struct {
+		name string
+		in   string
+		from string
+		want string
+	}{
+		{
+			name: "standalone ANSI bg",
+			in:   "\x1b[40mhello\x1b[m",
+			from: "40",
+			want: "\x1b[" + to + "mhello\x1b[m",
+		},
+		{
+			name: "bundled SGR with ANSI bg",
+			in:   "\x1b[1;31;40mbold red on black\x1b[m",
+			from: "40",
+			want: "\x1b[1;31;" + to + "mbold red on black\x1b[m",
+		},
+		{
+			name: "literal 40 in content is not touched",
+			in:   "page 40 of 100\x1b[40mtinted\x1b[m",
+			from: "40",
+			want: "page 40 of 100\x1b[" + to + "mtinted\x1b[m",
+		},
+		{
+			name: "256-color FG index 40 is not touched",
+			in:   "\x1b[38;5;40mfg only\x1b[m",
+			from: "40",
+			want: "\x1b[38;5;40mfg only\x1b[m",
+		},
+		{
+			name: "256-color FG index 40 alongside bg 40 — only bg substituted",
+			in:   "\x1b[38;5;40;40mfg256 bg basic\x1b[m",
+			from: "40",
+			want: "\x1b[38;5;40;" + to + "mfg256 bg basic\x1b[m",
+		},
+		{
+			name: "truecolor bg substring substitution",
+			in:   "\x1b[48;2;26;26;46mhello\x1b[m",
+			from: "48;2;26;26;46",
+			want: "\x1b[" + to + "mhello\x1b[m",
+		},
+		{
+			name: "truecolor bg within bundled SGR",
+			in:   "\x1b[1;38;2;255;255;255;48;2;26;26;46mtext\x1b[m",
+			from: "48;2;26;26;46",
+			want: "\x1b[1;38;2;255;255;255;" + to + "mtext\x1b[m",
+		},
+		{
+			name: "no match leaves string unchanged",
+			in:   "\x1b[31mred fg only\x1b[m",
+			from: "40",
+			want: "\x1b[31mred fg only\x1b[m",
+		},
+		{
+			name: "from == to is a no-op",
+			in:   "\x1b[40mhello\x1b[m",
+			from: "40",
+			// to passed = "40" same as from
+			want: "\x1b[40mhello\x1b[m",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			useTo := to
+			if tc.name == "from == to is a no-op" {
+				useTo = "40"
+			}
+			got := substituteBgSGR(tc.in, tc.from, useTo)
+			if got != tc.want {
+				t.Errorf("substituteBgSGR(%q, %q, %q) = %q, want %q",
+					tc.in, tc.from, useTo, got, tc.want)
+			}
+		})
+	}
+}
