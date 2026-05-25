@@ -1,6 +1,7 @@
 package messages
 
 import (
+	"image/color"
 	"strings"
 	"testing"
 
@@ -439,5 +440,78 @@ func TestEscapedAngleBracketsNotMistakenForMention(t *testing.T) {
 	}
 	if !strings.Contains(plain, "<@U123>") {
 		t.Errorf("expected literal %q, got %q", "<@U123>", plain)
+	}
+}
+
+// TestBgANSIForBasicColor asserts that bgANSIFor emits native ANSI 16
+// background escapes (e.g. "\x1b[41m") for ansi.BasicColor instead of
+// degrading to truecolor. Native ANSI 16 escapes are required for the
+// terminal palette to be honored — truecolor escapes always bypass it.
+func TestBgANSIForBasicColor(t *testing.T) {
+	cases := []struct {
+		name string
+		c    ansi.BasicColor
+		want string
+	}{
+		{"black", 0, "\x1b[40m"},
+		{"red", 1, "\x1b[41m"},
+		{"white", 7, "\x1b[47m"},
+		{"bright black", 8, "\x1b[100m"},
+		{"bright red", 9, "\x1b[101m"},
+		{"bright white", 15, "\x1b[107m"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := bgANSIFor(tc.c)
+			if got != tc.want {
+				t.Errorf("bgANSIFor(%d) = %q, want %q", tc.c, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestFgANSIForBasicColor: symmetric for foreground.
+func TestFgANSIForBasicColor(t *testing.T) {
+	cases := []struct {
+		name string
+		c    ansi.BasicColor
+		want string
+	}{
+		{"black", 0, "\x1b[30m"},
+		{"red", 1, "\x1b[31m"},
+		{"white", 7, "\x1b[37m"},
+		{"bright black", 8, "\x1b[90m"},
+		{"bright red", 9, "\x1b[91m"},
+		{"bright white", 15, "\x1b[97m"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := fgANSIFor(tc.c)
+			if got != tc.want {
+				t.Errorf("fgANSIFor(%d) = %q, want %q", tc.c, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestBgFgANSIForIndexedColor asserts ANSI 256 emission for ansi.IndexedColor.
+func TestBgFgANSIForIndexedColor(t *testing.T) {
+	if got := bgANSIFor(ansi.IndexedColor(42)); got != "\x1b[48;5;42m" {
+		t.Errorf("bgANSIFor(IndexedColor(42)) = %q, want %q", got, "\x1b[48;5;42m")
+	}
+	if got := fgANSIFor(ansi.IndexedColor(200)); got != "\x1b[38;5;200m" {
+		t.Errorf("fgANSIFor(IndexedColor(200)) = %q, want %q", got, "\x1b[38;5;200m")
+	}
+}
+
+// TestBgFgANSIForRGBA is a regression guard: truecolor emission is unchanged
+// for existing hex-based themes.
+func TestBgFgANSIForRGBA(t *testing.T) {
+	c := color.RGBA{R: 26, G: 26, B: 46, A: 0xff}
+	if got := bgANSIFor(c); got != "\x1b[48;2;26;26;46m" {
+		t.Errorf("bgANSIFor(RGBA) = %q, want %q", got, "\x1b[48;2;26;26;46m")
+	}
+	if got := fgANSIFor(c); got != "\x1b[38;2;26;26;46m" {
+		t.Errorf("fgANSIFor(RGBA) = %q, want %q", got, "\x1b[38;2;26;26;46m")
 	}
 }

@@ -345,14 +345,42 @@ func bgSGRParams(ansi string) string {
 	return ansi[len(prefix) : len(ansi)-len(suffix)]
 }
 
-// bgANSIFor returns the ANSI 24-bit background-color escape for c.
+// bgANSIFor returns the ANSI background-color escape for c.
+// For ansi.BasicColor it emits the native 16-color SGR (\x1b[40m–\x1b[47m,
+// \x1b[100m–\x1b[107m) so the user's terminal palette is honored.
+// For ansi.IndexedColor it emits the 256-color form (\x1b[48;5;Nm).
+// Otherwise it falls back to truecolor (\x1b[48;2;R;G;Bm).
 func bgANSIFor(c color.Color) string {
+	switch v := c.(type) {
+	case ansi.BasicColor:
+		if v < 8 {
+			return fmt.Sprintf("\x1b[%dm", 40+int(v))
+		}
+		if v < 16 {
+			return fmt.Sprintf("\x1b[%dm", 100+int(v-8))
+		}
+		// out-of-range BasicColor: fall through to RGBA
+	case ansi.IndexedColor:
+		return fmt.Sprintf("\x1b[48;5;%dm", int(v))
+	}
 	r, g, b, _ := c.RGBA()
 	return fmt.Sprintf("\x1b[48;2;%d;%d;%dm", r>>8, g>>8, b>>8)
 }
 
-// fgANSIFor returns the ANSI 24-bit foreground-color escape for c.
+// fgANSIFor returns the ANSI foreground-color escape for c.
+// See bgANSIFor for the type-switch rationale.
 func fgANSIFor(c color.Color) string {
+	switch v := c.(type) {
+	case ansi.BasicColor:
+		if v < 8 {
+			return fmt.Sprintf("\x1b[%dm", 30+int(v))
+		}
+		if v < 16 {
+			return fmt.Sprintf("\x1b[%dm", 90+int(v-8))
+		}
+	case ansi.IndexedColor:
+		return fmt.Sprintf("\x1b[38;5;%dm", int(v))
+	}
 	r, g, b, _ := c.RGBA()
 	return fmt.Sprintf("\x1b[38;2;%d;%d;%dm", r>>8, g>>8, b>>8)
 }
