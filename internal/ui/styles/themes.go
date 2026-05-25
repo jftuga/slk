@@ -281,7 +281,7 @@ var builtinThemes = map[string]struct {
 	// Values are passed through lipgloss.Color() which returns
 	// ansi.BasicColor, so rendering uses native 16-color SGR escapes
 	// and inherits the user's terminal palette.
-	"ansi-dark": {"ANSI Dark", ThemeColors{
+	"ansi dark": {"ANSI Dark", ThemeColors{
 		Primary: "4", Accent: "6", Warning: "3", Error: "1",
 		Background: "0", Surface: "8", SurfaceDark: "0",
 		Text: "15", TextMuted: "8", Border: "8",
@@ -289,7 +289,7 @@ var builtinThemes = map[string]struct {
 	// ansi-light is the light-terminal counterpart to ansi-dark. Same
 	// ANSI-16-only constraint; values chosen for readability on light
 	// terminal backgrounds.
-	"ansi-light": {"ANSI Light", ThemeColors{
+	"ansi light": {"ANSI Light", ThemeColors{
 		Primary: "4", Accent: "6", Warning: "3", Error: "1",
 		Background: "15", Surface: "7", SurfaceDark: "7",
 		Text: "0", TextMuted: "8", Border: "8",

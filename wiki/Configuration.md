@@ -111,7 +111,7 @@ regardless of network timing, even without an explicit `order` set.
 Legacy configs that key the block by raw team ID
 (`[workspaces.T01ABCDEF]`) keep working unchanged.
 
-## Terminal-palette themes (`ansi-dark`, `ansi-light`)
+## Terminal-palette themes (`ANSI Dark`, `ANSI Light`)
 
 Two built-in themes use ANSI 16 color codes exclusively rather than
 fixed RGB values. They inherit the user's terminal color palette, so
@@ -121,7 +121,7 @@ match.
 
 ```toml
 [appearance]
-theme = "ansi-dark"   # or "ansi-light"
+theme = "ANSI Dark"   # or "ANSI Light"
 ```
 
 Pick the variant whose background matches your terminal's background.

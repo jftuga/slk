@@ -624,18 +624,20 @@ func TestSubstituteBgSGR(t *testing.T) {
 
 // TestRepaintBgToSelectionTintWithANSITheme exercises the integration
 // of substituteBgSGR via RepaintBgToSelectionTint when the theme uses
-// an ANSI 16 background. We apply ansi-dark so BgANSI() returns the
+// an ANSI 16 background. We apply ansi dark so BgANSI() returns the
 // basic 16-color form "\x1b[40m" — independent of how the theme stores
 // the value internally. The repaint must substitute the bundled "40"
 // param without corrupting either literal content or 256-color
 // sub-arguments.
 func TestRepaintBgToSelectionTintWithANSITheme(t *testing.T) {
-	// Apply ansi-dark; restore dark afterward.
-	styles.Apply("ansi-dark", config.Theme{})
+	// Apply ansi dark via the display-name form to exercise the same
+	// case-insensitive lookup path that the theme picker uses when it
+	// saves "ANSI Dark" to config.toml. Restore dark afterward.
+	styles.Apply("ANSI Dark", config.Theme{})
 	t.Cleanup(func() { styles.Apply("dark", config.Theme{}) })
 
 	if BgANSI() != "\x1b[40m" {
-		t.Skipf("ansi-dark theme not yet registered (Task 4 dependency); BgANSI()=%q", BgANSI())
+		t.Skipf("ansi dark theme not yet registered (Task 4 dependency); BgANSI()=%q", BgANSI())
 	}
 
 	// Build a synthetic rendered string mixing: plain text containing
