@@ -12,7 +12,7 @@ func TestResolveShortcodesInText(t *testing.T) {
 		{"single safe emoji", "look :smile: here", "look 😄  here"},
 		{"single unsafe (ZWJ) emoji stays text", "pride :rainbow_flag: month", "pride :rainbow_flag: month"},
 		{"unsafe with slack hyphen form", "pride :rainbow-flag: month", "pride :rainbow-flag: month"},
-		{"VS16 emoji renders", "love :heart: you", "love ❤️  you"},
+		{"VS16 emoji stays as shortcode", "love :heart: you", "love :heart: you"},
 		{"unknown shortcode passes through", "wat :nope: lol", "wat :nope: lol"},
 		{"multiple safe", "hi :smile: and :fire:", "hi 😄  and 🔥 "},
 		{"safe + unsafe mixed", "ok :smile: :rainbow_flag: done", "ok 😄  :rainbow_flag: done"},

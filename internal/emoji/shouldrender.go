@@ -2,20 +2,20 @@ package emoji
 
 import "strings"
 
-// vs16 is U+FE0F, the variation selector that forces emoji presentation
-// for the preceding base codepoint. VS16 is well-supported across
-// terminal fonts because no glyph composition is required — the
-// terminal merely picks the emoji-presentation form of a single base
-// codepoint that the font already has.
-const vs16 rune = 0xFE0F
-
 // ShouldRenderUnicode reports whether the resolved Unicode form of an
-// emoji is composition-safe to render as a glyph. Returns true iff the
-// string contains exactly one base codepoint, or exactly one base
-// codepoint followed by VS16. Multi-codepoint sequences (ZWJ,
-// regional-indicator flag pairs, skin-tone modifiers) return false
-// because terminal font support for composition is inconsistent and
-// the resulting visual-width disagreement breaks slk's layout.
+// emoji is safe to render as a glyph. Returns true iff the string
+// contains exactly one codepoint. Any multi-codepoint sequence —
+// including base+VS16 (`❤️`, `⚠️`, `🌩️`), ZWJ sequences,
+// regional-indicator flag pairs, and skin-tone modifiers — returns
+// false.
+//
+// VS16 (U+FE0F) was previously treated as a "safe composition" but
+// field experience disagreed: many terminal+font combos render
+// VS16-anchored emoji from the legacy blocks (U+2600-2BFF and
+// U+1F300-1F5FF) at a different visual width than lipgloss reports,
+// breaking border alignment. Dropping the VS16 carve-out is the
+// pragmatic tradeoff: lose the colorful presentation for `:heart:`,
+// `:warning:`, `:lightning:`, etc., gain reliable layout.
 //
 // Trailing whitespace is ignored — kyokomi/emoji's Sprint appends a
 // trailing space after each resolved emoji and callers occasionally
@@ -26,12 +26,5 @@ func ShouldRenderUnicode(s string) bool {
 		return false
 	}
 	runes := []rune(s)
-	switch len(runes) {
-	case 1:
-		return true
-	case 2:
-		return runes[1] == vs16
-	default:
-		return false
-	}
+	return len(runes) == 1
 }

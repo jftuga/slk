@@ -15,10 +15,12 @@ func TestShouldRenderUnicode(t *testing.T) {
 		// Single non-emoji codepoint (rule is structural; harmless).
 		{"single ascii letter", "a", true},
 		{"single misc symbol", "\u2603", true},
-		// Single base codepoint + VS16 (well-supported composition).
-		{"heart + VS16", "\u2764\uFE0F", true},
-		{"warning + VS16", "\u26A0\uFE0F", true},
-		{"flag base + VS16", "\U0001F3F3\uFE0F", true},
+		// Single base codepoint + VS16. Previously rendered as glyph;
+		// now falls back to shortcode because font support for
+		// VS16 emoji presentation in legacy blocks is inconsistent.
+		{"heart + VS16", "\u2764\uFE0F", false},
+		{"warning + VS16", "\u26A0\uFE0F", false},
+		{"flag base + VS16", "\U0001F3F3\uFE0F", false},
 		// Multi-codepoint composition (the cases the bug is about).
 		{"ZWJ pride flag", "\U0001F3F3\uFE0F\u200D\U0001F308", false},
 		{"ZWJ family", "\U0001F468\u200D\U0001F469\u200D\U0001F467", false},

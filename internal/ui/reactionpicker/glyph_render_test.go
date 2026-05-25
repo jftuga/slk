@@ -59,12 +59,13 @@ func TestViewOverlayPreservesFireGlyph(t *testing.T) {
 	}
 }
 
-// TestPickerRendersHeartGlyph guards that VS16-anchored emoji
-// (single base + U+FE0F) DO render as a glyph. This is the case
-// that the picker's previous len(runes)==1 rule incorrectly
-// excluded — surfacing it again was a key win of the
-// ShouldRenderUnicode-based rule.
-func TestPickerRendersHeartGlyph(t *testing.T) {
+// TestPickerFallsBackForVS16Emoji guards that VS16-anchored emoji
+// (single base + U+FE0F) now fall back to :name: text rather than
+// rendering the Unicode glyph. Many terminal+font combos render
+// VS16 emoji from legacy blocks at a different visual width than
+// lipgloss reports, breaking border alignment; the shortcode form
+// is layout-safe.
+func TestPickerFallsBackForVS16Emoji(t *testing.T) {
 	m := New()
 	m.SetFrecentEmoji([]EmojiEntry{})
 	m.Open("Cxxx", "1.0", nil)
@@ -72,8 +73,11 @@ func TestPickerRendersHeartGlyph(t *testing.T) {
 		m.HandleKey(string(ch))
 	}
 	view := m.View(120)
-	if !strings.Contains(view, "\u2764\uFE0F") {
-		t.Errorf("rendered picker does NOT contain ❤️ glyph (VS16-anchored) for :heart: search")
+	if !strings.Contains(view, ":heart:") {
+		t.Errorf("rendered picker does NOT contain literal :heart: text for VS16-anchored emoji")
+	}
+	if strings.Contains(view, "\u2764\uFE0F") {
+		t.Errorf("rendered picker contains ❤️ Unicode glyph; expected :heart: text fallback")
 	}
 }
 
