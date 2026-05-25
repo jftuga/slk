@@ -25,9 +25,13 @@
 package ui
 
 import (
+	"fmt"
+	"strings"
+
 	tea "charm.land/bubbletea/v2"
 
 	"github.com/gammons/slk/internal/debuglog"
+	"github.com/gammons/slk/internal/ui/sidebar"
 )
 
 var reduceNewMessagePicker reducerFunc = func(a *App, msg tea.Msg) (tea.Cmd, bool) {
@@ -48,15 +52,15 @@ var reduceNewMessagePicker reducerFunc = func(a *App, msg tea.Msg) (tea.Cmd, boo
 		a.newMessageCancelled = false
 		a.SetMode(ModeInsert)
 
-		// Task 12 inserts a minimal cache record here when
-		// m.AlreadyOpen == false. For now, emit ChannelSelectedMsg
-		// directly; existing flows (cache miss, RTM hydration) fill
-		// in the rest.
-		channelID := m.ChannelID
 		channelType := "dm"
 		if len(m.UserIDs) > 1 {
 			channelType = "group_dm"
 		}
+		if !m.AlreadyOpen {
+			a.hydrateNewConversation(m.ChannelID, channelType, m.UserIDs)
+		}
+
+		channelID := m.ChannelID
 		return func() tea.Msg {
 			return ChannelSelectedMsg{ID: channelID, Type: channelType}
 		}, true
@@ -75,6 +79,46 @@ var reduceNewMessagePicker reducerFunc = func(a *App, msg tea.Msg) (tea.Cmd, boo
 		return func() tea.Msg { return ToastMsg{Text: "Open DM failed: " + errText} }, true
 	}
 	return nil, false
+}
+
+// hydrateNewConversation inserts a minimal sidebar.ChannelItem for a
+// freshly-opened DM or MPIM so the channel-switch path has a record
+// to render against. The full channel metadata is filled in by the
+// existing RTM event handlers (mpim_open / im_created) and the
+// membership.Manager.
+func (a *App) hydrateNewConversation(channelID, channelType string, userIDs []string) {
+	item := sidebar.ChannelItem{
+		ID:   channelID,
+		Type: channelType,
+		Name: a.deriveConversationName(channelType, userIDs),
+	}
+	if channelType == "dm" && len(userIDs) == 1 {
+		item.DMUserID = userIDs[0]
+	}
+	a.sidebar.UpsertItem(item)
+}
+
+// deriveConversationName builds a display name for a freshly-opened
+// DM/MPIM. For DMs we use the peer's display name. For MPIMs we
+// join up to 3 names with ", " and append "+N" for the rest.
+func (a *App) deriveConversationName(channelType string, userIDs []string) string {
+	const previewLimit = 3
+	names := make([]string, 0, len(userIDs))
+	for _, id := range userIDs {
+		if name, ok := a.userNames[id]; ok && name != "" {
+			names = append(names, name)
+		} else {
+			names = append(names, id)
+		}
+	}
+	if channelType == "dm" {
+		return names[0]
+	}
+	if len(names) <= previewLimit {
+		return strings.Join(names, ", ")
+	}
+	preview := strings.Join(names[:previewLimit], ", ")
+	return fmt.Sprintf("%s +%d", preview, len(names)-previewLimit)
 }
 
 // newMessageResultIsCurrent reports whether a NewMessage* message

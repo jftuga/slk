@@ -117,6 +117,79 @@ func TestReducer_NewMessageOpenedMsg_DroppedWhenRequestIDMismatches(t *testing.T
 	}
 }
 
+func TestReducer_NewMessageOpenedMsg_AlreadyOpenSkipsCacheInsert(t *testing.T) {
+	app, _ := newApp_WithOpenConvCapture(t)
+	_, _ = app.Update(EnterNewMessageMsg{})
+	app.newMessageInFlightID = 1
+	priorCount := len(app.sidebar.AllItems())
+
+	_, _ = app.Update(NewMessageOpenedMsg{
+		ChannelID:   "D456",
+		AlreadyOpen: true,
+		UserIDs:     []string{"U1"},
+		RequestID:   1,
+	})
+
+	if got := len(app.sidebar.AllItems()); got != priorCount {
+		t.Errorf("expected no sidebar mutation for AlreadyOpen=true, count went from %d to %d", priorCount, got)
+	}
+}
+
+func TestReducer_NewMessageOpenedMsg_NewChannelInsertedAsDM(t *testing.T) {
+	app, _ := newApp_WithOpenConvCapture(t)
+	_, _ = app.Update(EnterNewMessageMsg{})
+	app.newMessageInFlightID = 1
+
+	_, _ = app.Update(NewMessageOpenedMsg{
+		ChannelID:   "D789",
+		AlreadyOpen: false,
+		UserIDs:     []string{"U1"},
+		RequestID:   1,
+	})
+
+	found := false
+	for _, ch := range app.sidebar.AllItems() {
+		if ch.ID == "D789" {
+			found = true
+			if ch.Type != "dm" {
+				t.Errorf("expected Type=dm, got %s", ch.Type)
+			}
+			if ch.DMUserID != "U1" {
+				t.Errorf("expected DMUserID=U1, got %s", ch.DMUserID)
+			}
+		}
+	}
+	if !found {
+		t.Error("expected D789 inserted into sidebar")
+	}
+}
+
+func TestReducer_NewMessageOpenedMsg_NewChannelInsertedAsGroupDM(t *testing.T) {
+	app, _ := newApp_WithOpenConvCapture(t)
+	_, _ = app.Update(EnterNewMessageMsg{})
+	app.newMessageInFlightID = 1
+
+	_, _ = app.Update(NewMessageOpenedMsg{
+		ChannelID:   "G999",
+		AlreadyOpen: false,
+		UserIDs:     []string{"U1", "U2"},
+		RequestID:   1,
+	})
+
+	found := false
+	for _, ch := range app.sidebar.AllItems() {
+		if ch.ID == "G999" {
+			found = true
+			if ch.Type != "group_dm" {
+				t.Errorf("expected Type=group_dm, got %s", ch.Type)
+			}
+		}
+	}
+	if !found {
+		t.Error("expected G999 inserted into sidebar")
+	}
+}
+
 func TestReducer_NewMessageFailedMsg_KeepsModalOpenAndEmitsToast(t *testing.T) {
 	app, _ := newApp_WithOpenConvCapture(t)
 	_, _ = app.Update(EnterNewMessageMsg{})
