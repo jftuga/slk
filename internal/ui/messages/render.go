@@ -318,12 +318,13 @@ func SelectionTintBgANSI(focused bool) string {
 //
 // Implementation note: lipgloss/v2 combines multiple SGR codes into a
 // single escape sequence (e.g. "\x1b[1;38;2;R;G;B;48;2;R;G;Bm" for
-// bold + fg + bg), so substituting the framed "\x1b[48;2;R;G;Bm" form
-// would miss every occurrence where the bg is bundled with other
-// attributes. We strip the "\x1b[" prefix and "m" suffix and match
-// just the bg-parameter substring "48;2;R;G;B", which appears
-// verbatim regardless of how lipgloss bundles other SGR params around
-// it.
+// bold + fg + bg), so the substitution must reach the bg parameter
+// even when it's bundled with other attributes. We delegate to
+// substituteBgSGR, which is grammar-aware: it walks each SGR sequence
+// and substitutes only complete bg tokens. Grammar awareness also
+// makes ANSI 16 bg params like "40" safe to substitute — a naive
+// substring replacement would collide with literal digits in content
+// and with 256-color sub-arguments such as "38;5;40".
 func RepaintBgToSelectionTint(s string, focused bool) string {
 	from := bgSGRParams(BgANSI())
 	to := bgSGRParams(SelectionTintBgANSI(focused))

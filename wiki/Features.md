@@ -92,7 +92,7 @@ See [[Terminal Compatibility|Terminal-Compatibility]] for which protocol your te
 
 ## Customization
 
-- 12 built-in modern-looking themes
+- 36 built-in themes (including `ansi-dark` / `ansi-light` that inherit your terminal palette)
 - Drop-in custom themes (`~/.config/slk/themes/*.toml`)
 - Live theme switcher (`Ctrl+y`)
 - TOML config for appearance, animations, notifications, and channel sections
