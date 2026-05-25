@@ -111,6 +111,24 @@ regardless of network timing, even without an explicit `order` set.
 Legacy configs that key the block by raw team ID
 (`[workspaces.T01ABCDEF]`) keep working unchanged.
 
+## Terminal-palette themes (`ansi-dark`, `ansi-light`)
+
+Two built-in themes use ANSI 16 color codes exclusively rather than
+fixed RGB values. They inherit the user's terminal color palette, so
+changing your terminal colorscheme (light/dark, solarized,
+accessibility palettes, etc.) immediately changes slk's UI colors to
+match.
+
+    [appearance]
+    theme = "ansi-dark"   # or "ansi-light"
+
+Pick the variant whose background matches your terminal's background.
+
+**Trade-off:** selection-row highlights and compose-input tints are
+still computed as RGB approximations, so the tint regions of those
+elements use truecolor rather than your palette. The rest of the UI
+honors the palette.
+
 ## Custom themes
 
 Drop `.toml` files into `~/.config/slk/themes/`:
