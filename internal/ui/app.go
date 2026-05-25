@@ -1644,6 +1644,41 @@ func (a *App) SetUserNames(names map[string]string) {
 	a.threadCompose.SetUsers(users)
 }
 
+// seedNewMessagePicker snapshots the current workspace's user list
+// into the new-message picker and configures the self-exclusion.
+// Called when ModeNewMessage is entered so the modal always sees a
+// fresh view of the workspace.
+//
+// User-list shape:
+//   - DisplayName from a.userNames (the workspace display name map).
+//   - Username falls back to DisplayName — there is no separate
+//     userID->handle map on App today. The picker uses Username
+//     only for filter matching, so this fallback degrades
+//     gracefully: queries against the display name still hit.
+//   - IsExternal from a.externalUsers.
+//   - Recency is left at 0 (alphabetical order; recency wiring is a
+//     follow-up that needs WorkspaceContext.LastVisitedByChannel
+//     plumbed in).
+//   - Self (a.currentUserID) is excluded both at slice-build time
+//     and via SetCurrentUserID (belt-and-suspenders).
+func (a *App) seedNewMessagePicker() {
+	users := make([]newmessagepicker.User, 0, len(a.userNames))
+	for id, name := range a.userNames {
+		if id == a.currentUserID {
+			continue
+		}
+		users = append(users, newmessagepicker.User{
+			ID:          id,
+			DisplayName: name,
+			Username:    name, // see scoping note; replaceable when a handle map lands
+			IsExternal:  a.externalUsers[id],
+		})
+	}
+
+	a.newMessagePicker.SetCurrentUserID(a.currentUserID)
+	a.newMessagePicker.SetUsers(users)
+}
+
 // SetExternalUsers replaces the set of user IDs known to be Slack
 // Connect / shared-channel guests. Sticky: subsequent SetUserNames
 // calls consult this map when building mention-picker entries.

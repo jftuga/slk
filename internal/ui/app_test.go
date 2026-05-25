@@ -4274,3 +4274,42 @@ func TestChannelSelectedReturnsPromptlyEvenIfFetcherBlocks(t *testing.T) {
 		t.Fatal("Update did not return within 100ms; fetcher is being called synchronously on the Update goroutine — risks bubbletea Send-from-Update deadlock")
 	}
 }
+
+func TestSeedNewMessagePicker_PopulatesUsersAndExcludesSelf(t *testing.T) {
+	app := NewApp()
+	app.currentUserID = "USELF"
+	app.SetUserNames(map[string]string{
+		"USELF": "Me",
+		"U1":    "Alice",
+		"U2":    "Bob",
+	})
+	app.SetExternalUsers(map[string]bool{"U2": true})
+
+	app.seedNewMessagePicker()
+
+	users := app.newMessagePicker.Users()
+	// Picker holds all non-self users. The picker excludes self via
+	// SetCurrentUserID at filter time, not at the SetUsers slice level.
+	// So the slice should contain Alice + Bob + Me, but after Open()
+	// the filtered list excludes Me.
+	ids := map[string]bool{}
+	for _, u := range users {
+		ids[u.ID] = true
+	}
+	if !ids["U1"] {
+		t.Error("expected Alice (U1) in picker users")
+	}
+	if !ids["U2"] {
+		t.Error("expected Bob (U2) in picker users")
+	}
+	if ids["USELF"] {
+		t.Error("expected USELF excluded from seeded slice")
+	}
+
+	// External flag should propagate.
+	for _, u := range users {
+		if u.ID == "U2" && !u.IsExternal {
+			t.Error("expected Bob (U2) to be marked external")
+		}
+	}
+}

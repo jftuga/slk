@@ -60,6 +60,12 @@ func (m *Model) SetUsers(users []User) {
 	m.users = users
 }
 
+// Users returns the user list most recently set via SetUsers. Used
+// by tests; not part of the picker's input API.
+func (m *Model) Users() []User {
+	return m.users
+}
+
 // SetCurrentUserID configures which user ID represents "self" so the
 // picker can hide it from the list (a user cannot start a DM with
 // themselves via this flow). May be called once at app start.
