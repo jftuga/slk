@@ -480,7 +480,6 @@ func (f *Fetcher) tryDownload(ctx context.Context, url string, auth TeamAuth) ([
 			url, time.Since(httpStart).Milliseconds(), err)
 		return nil, "", 0, err
 	}
-	httpReq.Header.Set("User-Agent", "slk/inline-image-fetcher")
 	if auth.Token != "" {
 		httpReq.Header.Set("Authorization", "Bearer "+auth.Token)
 	}

@@ -9,9 +9,57 @@ import (
 	imgpng "image/png"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync"
 	"testing"
+
+	"github.com/gammons/slk/internal/slackhttp"
 )
+
+// TestTryDownload_NoCustomUserAgent verifies two related facts about
+// the image fetcher after the BrowserTransport switch:
+//  1. The fetcher no longer announces itself with the legacy
+//     slk/inline-image-fetcher User-Agent (which was just as flagable
+//     as Go-http-client/1.1).
+//  2. BrowserTransport correctly *skips* header injection for
+//     non-Slack hosts (the test uses a 127.0.0.1 httptest server),
+//     so the browser UA does not leak to arbitrary destinations.
+func TestTryDownload_NoCustomUserAgent(t *testing.T) {
+	var gotHeaders http.Header
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotHeaders = r.Header.Clone()
+		w.Header().Set("Content-Type", "image/png")
+		w.WriteHeader(200)
+		w.Write([]byte("not-a-real-png"))
+	}))
+	defer srv.Close()
+
+	client := slackhttp.NewBrowserHTTPClient(nil)
+	f := &Fetcher{http: client}
+
+	body, _, status, err := f.tryDownload(context.Background(), srv.URL, TeamAuth{})
+	if err != nil {
+		t.Fatalf("tryDownload: %v", err)
+	}
+	if status != 200 {
+		t.Fatalf("status = %d", status)
+	}
+	if string(body) != "not-a-real-png" {
+		t.Fatalf("body = %q", body)
+	}
+
+	// 127.0.0.1 is NOT a Slack host, so BrowserTransport correctly skips
+	// header injection. This confirms host-scoping is working.
+	if ua := gotHeaders.Get("User-Agent"); strings.HasPrefix(ua, "Mozilla/5.0") {
+		t.Errorf("browser UA leaked to non-Slack host: %q", ua)
+	}
+	// The old explicit slk-specific UA must be gone — the fetcher no
+	// longer sets one. Go's default ("Go-http-client/1.1") is the
+	// expected fallback when no transport injects one.
+	if ua := gotHeaders.Get("User-Agent"); strings.Contains(ua, "slk/inline-image-fetcher") {
+		t.Errorf("legacy slk-specific UA still present: %q", ua)
+	}
+}
 
 // tinyWebP is a tiny valid WebP image (VP8, 8x8 white) used to verify
 // that the WebP decoder is registered with the stdlib image registry.

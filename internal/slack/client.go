@@ -14,6 +14,7 @@ import (
 
 	"github.com/gammons/slk/internal/debuglog"
 	"github.com/gammons/slk/internal/slack/mrkdwn"
+	"github.com/gammons/slk/internal/slackhttp"
 	"github.com/gorilla/websocket"
 	"github.com/slack-go/slack"
 )
@@ -121,9 +122,12 @@ func newCookieJar(dCookie string) http.CookieJar {
 	return jar
 }
 
-// newCookieHTTPClient creates an http.Client with the Slack 'd' cookie set.
+// newCookieHTTPClient creates an http.Client with the Slack 'd' cookie set
+// and a BrowserTransport that injects Chrome-like headers on every request
+// to *.slack.com hosts. This keeps Enterprise Grid anomaly detectors from
+// flagging slk's traffic as non-browser. See internal/slackhttp.
 func newCookieHTTPClient(dCookie string) *http.Client {
-	return &http.Client{Jar: newCookieJar(dCookie)}
+	return slackhttp.NewBrowserHTTPClient(newCookieJar(dCookie))
 }
 
 // TeamID returns the authenticated workspace's team ID.
@@ -200,6 +204,22 @@ func deriveAPIBaseURL(authTestURL string) string {
 	return "https://" + host + "/api/"
 }
 
+// wsUpgradeHeaders returns the HTTP headers slk attaches to the WebSocket
+// upgrade request. These match the Chrome-like headers BrowserTransport
+// adds to ordinary HTTP requests, with Sec-Fetch-Dest narrowed to
+// "websocket" — the value a real browser sends when opening a WS to
+// app.slack.com.
+//
+// gorilla/websocket's Dialer.Dial accepts arbitrary headers (except for
+// the protocol-managed Sec-WebSocket-* set, which it owns), so this is
+// the right injection point. We can't reuse BrowserTransport here because
+// the dialer doesn't go through http.RoundTripper.
+func wsUpgradeHeaders() http.Header {
+	h := slackhttp.BrowserHeaders()
+	h.Set("Sec-Fetch-Dest", "websocket")
+	return h
+}
+
 // StartWebSocket connects to Slack's internal WebSocket using the xoxc token
 // and d cookie, matching the protocol used by the browser client.
 // Events are dispatched to the provided handler in a goroutine.
@@ -214,10 +234,7 @@ func (c *Client) StartWebSocket(handler EventHandler) error {
 	jar := newCookieJar(c.cookie)
 	dialer := &websocket.Dialer{Jar: jar}
 
-	headers := http.Header{}
-	headers.Add("Origin", "https://app.slack.com")
-
-	conn, _, err := dialer.Dial(wsURL, headers)
+	conn, _, err := dialer.Dial(wsURL, wsUpgradeHeaders())
 	if err != nil {
 		return fmt.Errorf("websocket connect failed: %w", err)
 	}
@@ -734,11 +751,11 @@ type ThreadsAggregate struct {
 // hit subscriptions.thread.* directly.
 func (c *Client) GetUnreadCounts() ([]UnreadInfo, ThreadsAggregate, error) {
 	reqURL := c.apiBaseURL + "client.counts"
-	req, err := http.NewRequest("POST", reqURL, nil)
+	form := url.Values{"token": {c.token}}
+	req, err := http.NewRequest("POST", reqURL, strings.NewReader(form.Encode()))
 	if err != nil {
 		return nil, ThreadsAggregate{}, fmt.Errorf("creating request: %w", err)
 	}
-	req.Header.Set("Authorization", "Bearer "+c.token)
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 
 	httpClient := newCookieHTTPClient(c.cookie)
@@ -996,6 +1013,7 @@ func (c *Client) GetPermalink(ctx context.Context, channelID, ts string) (string
 // httpClient to a cookie-bearing client.
 func (c *Client) markChannel(ctx context.Context, channelID, ts string) error {
 	data := url.Values{
+		"token":   {c.token},
 		"channel": {channelID},
 		"ts":      {ts},
 	}
@@ -1006,7 +1024,6 @@ func (c *Client) markChannel(ctx context.Context, channelID, ts string) error {
 		return fmt.Errorf("creating mark request: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	req.Header.Set("Authorization", "Bearer "+c.token)
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
@@ -1032,6 +1049,7 @@ func (c *Client) markThread(ctx context.Context, channelID, threadTS, ts string,
 		readVal = "1"
 	}
 	data := url.Values{
+		"token":     {c.token},
 		"channel":   {channelID},
 		"thread_ts": {threadTS},
 		"ts":        {ts},
@@ -1044,7 +1062,6 @@ func (c *Client) markThread(ctx context.Context, channelID, threadTS, ts string,
 		return fmt.Errorf("creating thread mark request: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	req.Header.Set("Authorization", "Bearer "+c.token)
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
@@ -1180,18 +1197,29 @@ func (c *Client) GetMutedChannelsRaw(ctx context.Context) ([]byte, error) {
 }
 
 // postForm performs a cookie-aware POST to an endpoint under
-// c.apiBaseURL with optional form values and Bearer auth. Returns the
-// raw response body. Shared by hand-rolled undocumented endpoints.
+// c.apiBaseURL with form values. The xoxc token is injected into the
+// form body — the same convention slack-go and the official browser
+// client use. Returns the raw response body. Shared by hand-rolled
+// undocumented endpoints.
 func (c *Client) postForm(ctx context.Context, method string, form url.Values) ([]byte, error) {
-	var body io.Reader
-	if len(form) > 0 {
-		body = strings.NewReader(form.Encode())
+	// Inject the xoxc token into the form body — the same convention
+	// slack-go and the official browser client use. Using
+	// Authorization: Bearer here is an OAuth/server-side pattern that
+	// browsers never send to app.slack.com; combined with our browser-
+	// shaped headers it forms a contradictory signature that triggers
+	// Enterprise Grid anomaly detection (issue #5).
+	//
+	// Copy the caller's map so we don't mutate it across retries or
+	// concurrent calls.
+	body := url.Values{"token": {c.token}}
+	for k, vs := range form {
+		body[k] = vs
 	}
-	req, err := http.NewRequestWithContext(ctx, "POST", c.apiBaseURL+method, body)
+
+	req, err := http.NewRequestWithContext(ctx, "POST", c.apiBaseURL+method, strings.NewReader(body.Encode()))
 	if err != nil {
 		return nil, fmt.Errorf("creating %s request: %w", method, err)
 	}
-	req.Header.Set("Authorization", "Bearer "+c.token)
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 
 	httpClient := c.httpClient
@@ -1219,12 +1247,13 @@ func truncateForLog(b []byte) string {
 }
 
 // callChannelSectionsList performs the raw POST to users.channelSections.list
-// using cookie-aware auth (Bearer xoxc + d cookie) and an optional cursor for
-// pagination through sections. Shared by both the typed and raw accessors.
+// using cookie-aware auth (xoxc token in the form body + d cookie) and an
+// optional cursor for pagination through sections. Shared by both the typed
+// and raw accessors.
 func (c *Client) callChannelSectionsList(ctx context.Context, cursor string) ([]byte, error) {
 	endpoint := c.apiBaseURL + "users.channelSections.list"
 
-	form := url.Values{}
+	form := url.Values{"token": {c.token}}
 	if cursor != "" {
 		form.Set("cursor", cursor)
 	}
@@ -1234,7 +1263,6 @@ func (c *Client) callChannelSectionsList(ctx context.Context, cursor string) ([]
 	if err != nil {
 		return nil, fmt.Errorf("creating request: %w", err)
 	}
-	req.Header.Set("Authorization", "Bearer "+c.token)
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 
 	httpClient := newCookieHTTPClient(c.cookie)
