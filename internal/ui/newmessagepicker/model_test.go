@@ -74,3 +74,141 @@ func TestSetCurrentUserID_ExcludesSelfFromList(t *testing.T) {
 		}
 	}
 }
+
+func TestFilter_EmptyQuerySortsByRecencyDesc(t *testing.T) {
+	m := New()
+	m.SetUsers(testUsers()) // Alice=500, Bob=400, Carla=300, Dan=200, Eva=100
+	m.Open()
+
+	if len(m.filtered) != 5 {
+		t.Fatalf("expected 5 users, got %d", len(m.filtered))
+	}
+	wantOrder := []string{"U1", "U2", "U3", "U4", "U5"}
+	for i, want := range wantOrder {
+		got := m.users[m.filtered[i]].ID
+		if got != want {
+			t.Errorf("position %d: want %s, got %s", i, want, got)
+		}
+	}
+}
+
+func TestFilter_EmptyQueryTieBreaksAlphabetically(t *testing.T) {
+	users := []User{
+		{ID: "U1", DisplayName: "Charlie", Username: "c", Recency: 100},
+		{ID: "U2", DisplayName: "Alice", Username: "a", Recency: 100},
+		{ID: "U3", DisplayName: "Bob", Username: "b", Recency: 100},
+	}
+	m := New()
+	m.SetUsers(users)
+	m.Open()
+
+	wantOrder := []string{"U2", "U3", "U1"} // Alice, Bob, Charlie
+	for i, want := range wantOrder {
+		got := m.users[m.filtered[i]].ID
+		if got != want {
+			t.Errorf("position %d: want %s, got %s", i, want, got)
+		}
+	}
+}
+
+func TestFilter_PrefixBeatsSubstring(t *testing.T) {
+	users := []User{
+		{ID: "U1", DisplayName: "Marcus", Username: "marcus", Recency: 100},
+		{ID: "U2", DisplayName: "Alice Marketing", Username: "amark", Recency: 999},
+	}
+	m := New()
+	m.SetUsers(users)
+	m.Open()
+	m.setQuery("mar")
+
+	if len(m.filtered) != 2 {
+		t.Fatalf("expected 2 matches, got %d", len(m.filtered))
+	}
+	if m.users[m.filtered[0]].ID != "U1" {
+		t.Errorf("prefix match should come first, got %s", m.users[m.filtered[0]].ID)
+	}
+}
+
+func TestFilter_SubstringBeatsSubsequence(t *testing.T) {
+	users := []User{
+		{ID: "U1", DisplayName: "Stephanie", Username: "steph", Recency: 100},   // contains "eph"
+		{ID: "U2", DisplayName: "Edward Phillips", Username: "ep", Recency: 999}, // subseq e-p-h
+	}
+	m := New()
+	m.SetUsers(users)
+	m.Open()
+	m.setQuery("eph")
+
+	if m.filtered[0] != 0 {
+		t.Errorf("substring match should rank first, got user at index %d", m.filtered[0])
+	}
+}
+
+func TestFilter_CaseInsensitive(t *testing.T) {
+	m := New()
+	m.SetUsers(testUsers())
+	m.Open()
+	m.setQuery("ALICE")
+
+	if len(m.filtered) == 0 {
+		t.Fatal("expected at least 1 match for ALICE")
+	}
+	if m.users[m.filtered[0]].ID != "U1" {
+		t.Errorf("expected Alice (U1) as first match, got %s", m.users[m.filtered[0]].ID)
+	}
+}
+
+func TestFilter_MatchesUsernameHandle(t *testing.T) {
+	m := New()
+	m.SetUsers(testUsers())
+	m.Open()
+	m.setQuery("dan") // Dan Evans has Username="dan"
+
+	if len(m.filtered) == 0 {
+		t.Fatal("expected match for handle 'dan'")
+	}
+	if m.users[m.filtered[0]].ID != "U4" {
+		t.Errorf("expected Dan (U4) as first match, got %s", m.users[m.filtered[0]].ID)
+	}
+}
+
+func TestFilter_NoMatchesReturnsEmpty(t *testing.T) {
+	m := New()
+	m.SetUsers(testUsers())
+	m.Open()
+	m.setQuery("xyzqq")
+
+	if len(m.filtered) != 0 {
+		t.Errorf("expected 0 matches for unmatchable query, got %d", len(m.filtered))
+	}
+}
+
+func TestFilter_ExcludesSelfEvenOnMatch(t *testing.T) {
+	users := testUsers()
+	m := New()
+	m.SetCurrentUserID("U1") // Alice is self
+	m.SetUsers(users)
+	m.Open()
+	m.setQuery("alice")
+
+	for _, idx := range m.filtered {
+		if m.users[idx].ID == "U1" {
+			t.Error("self user should be excluded even when query matches")
+		}
+	}
+}
+
+func TestFilter_RecencyTieBreaksWithinSameTier(t *testing.T) {
+	users := []User{
+		{ID: "U1", DisplayName: "alice older", Username: "a1", Recency: 100},
+		{ID: "U2", DisplayName: "alice newer", Username: "a2", Recency: 999},
+	}
+	m := New()
+	m.SetUsers(users)
+	m.Open()
+	m.setQuery("alice") // both prefix-match
+
+	if m.users[m.filtered[0]].ID != "U2" {
+		t.Errorf("higher-recency match should come first, got %s", m.users[m.filtered[0]].ID)
+	}
+}

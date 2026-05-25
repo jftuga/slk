@@ -87,14 +87,10 @@ func (m Model) IsVisible() bool {
 	return m.visible
 }
 
-// filter is a placeholder until Task 3. For now it just includes
-// every user except self. Order is the natural users-slice order.
-func (m *Model) filter() {
-	m.filtered = m.filtered[:0]
-	for i, u := range m.users {
-		if u.ID == m.currentUserID {
-			continue
-		}
-		m.filtered = append(m.filtered, i)
-	}
+// setQuery is a test helper: replaces the query and refilters. The
+// real keystroke API in Task 4 will go through HandleKey.
+func (m *Model) setQuery(q string) {
+	m.query = q
+	m.highlight = 0
+	m.filter()
 }
