@@ -243,6 +243,29 @@ max_image_cache_mb = 50
 	}
 }
 
+func TestConfig_EmojiOverrides(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.toml")
+	data := []byte(`
+[appearance]
+emoji_images = "off"
+emoji_cells = 1
+`)
+	if err := os.WriteFile(path, data, 0644); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Appearance.EmojiImages != "off" {
+		t.Errorf("expected emoji_images 'off', got %q", cfg.Appearance.EmojiImages)
+	}
+	if cfg.Appearance.EmojiCells != 1 {
+		t.Errorf("expected emoji_cells 1, got %d", cfg.Appearance.EmojiCells)
+	}
+}
+
 func TestResolveThemeWorkspaceWins(t *testing.T) {
 	c := Config{
 		Appearance: Appearance{Theme: "dark"},
