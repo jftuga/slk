@@ -6,6 +6,7 @@ import (
 	"os"
 	"time"
 
+	"github.com/gammons/slk/internal/debuglog"
 	emojilib "github.com/kyokomi/emoji/v2"
 	"golang.org/x/term"
 )
@@ -40,6 +41,9 @@ type InitOptions struct {
 // install any width map or run the probe.
 func WillProbe(opts InitOptions) bool {
 	if opts.SkipProbe {
+		return false
+	}
+	if ImageModeActive() {
 		return false
 	}
 	if opts.ForceProbe {
@@ -97,6 +101,15 @@ func initWithIO(opts InitOptions, out io.Writer, in io.Reader) (bool, bool, erro
 	}
 	if opts.PerProbeTimeout == 0 {
 		opts.PerProbeTimeout = 200 * time.Millisecond
+	}
+
+	// Image-mode active: width measurement is bypassed for known emoji
+	// clusters (see Width() in width.go). The probe data is unused, so
+	// skip the probe entirely — saves ~30s of user-visible startup on
+	// first launch.
+	if ImageModeActive() {
+		debuglog.ImgRender("emoji probe skipped: image mode active")
+		return false, false, nil
 	}
 
 	terminalKey := IdentifyTerminal()

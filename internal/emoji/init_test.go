@@ -178,3 +178,28 @@ func TestInitSkipProbe(t *testing.T) {
 		t.Error("expected IsCalibrated to be false")
 	}
 }
+
+func TestWillProbe_RespectsImageMode(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("XDG_CACHE_HOME", dir)
+	t.Setenv("TERM_PROGRAM", "test_will_probe_imgmode")
+	t.Setenv("TERM_PROGRAM_VERSION", "1.0")
+
+	codemap := map[string]string{":a:": "A", ":b:": "B"}
+
+	// Image-mode active: probe should be skipped regardless of cache
+	// presence (no cache file exists in this TempDir).
+	resetImageMode()
+	SetImageMode(true, 2)
+	t.Cleanup(func() { resetImageMode() })
+
+	if WillProbe(InitOptions{Codemap: codemap}) {
+		t.Errorf("WillProbe() with image mode active = true, want false")
+	}
+
+	// Image-mode off: WillProbe should return true on an uncached system.
+	resetImageMode()
+	if !WillProbe(InitOptions{Codemap: codemap}) {
+		t.Errorf("WillProbe() with image mode inactive (no cache) = false, want true")
+	}
+}
