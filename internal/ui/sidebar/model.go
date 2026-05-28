@@ -33,6 +33,12 @@ type ChannelItem struct {
 	Type         string // channel, dm, group_dm, private, app
 	Section      string // section name for grouping (e.g. "Engineering", "Starred")
 	SectionOrder int    // sort order from config; lower = higher in sidebar (custom sections only)
+	// ChannelOrder is the per-channel sort position within a section,
+	// sourced from the SectionDef "<pattern>:<N>" suffix syntax. >0
+	// means the channel sorts ahead of un-annotated peers (which fall
+	// back to input order); among annotated channels, lower wins.
+	// Always 0 in Slack-native sections mode (config-glob feature only).
+	ChannelOrder int
 	IsStarred    bool
 	Presence     string // for DMs: active, away, dnd
 	DMUserID     string // for DMs: the user ID of the other party
@@ -865,19 +871,35 @@ func (m *Model) rebuildFilter() {
 
 	// Sort filtered indices to match the visual section display order so that
 	// j/k navigation traverses items in the same order they're rendered.
-	// Within a section, preserve the original (Slack-provided) item order.
+	// Within a section:
+	//   1. Channels with ChannelOrder > 0 come first, sorted ascending
+	//      (from SectionDef "<pattern>:<N>" suffixes; config-mode only).
+	//   2. Channels with ChannelOrder == 0 follow, in input order
+	//      (preserves Slack-provided order in Slack mode, and
+	//      bootstrap-order in config mode without ":N" suffixes).
 	sectionOrder := m.modelOrderedSections(m.filtered)
 	rank := make(map[string]int, len(sectionOrder))
 	for i, name := range sectionOrder {
 		rank[name] = i
 	}
 	sort.SliceStable(m.filtered, func(a, b int) bool {
-		ra := rank[m.sectionFor(m.items[m.filtered[a]])]
-		rb := rank[m.sectionFor(m.items[m.filtered[b]])]
+		ia, ib := m.filtered[a], m.filtered[b]
+		ra := rank[m.sectionFor(m.items[ia])]
+		rb := rank[m.sectionFor(m.items[ib])]
 		if ra != rb {
 			return ra < rb
 		}
-		return m.filtered[a] < m.filtered[b]
+		// Within a section: annotated (ChannelOrder > 0) before
+		// un-annotated; among annotated, lower wins; among
+		// un-annotated, preserve input order via stable sort.
+		oa, ob := m.items[ia].ChannelOrder, m.items[ib].ChannelOrder
+		if (oa > 0) != (ob > 0) {
+			return oa > 0
+		}
+		if oa != ob {
+			return oa < ob
+		}
+		return ia < ib
 	})
 }
 

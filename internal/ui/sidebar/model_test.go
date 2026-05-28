@@ -681,6 +681,68 @@ func TestView_RendersDotFromReadStateReader(t *testing.T) {
 	}
 }
 
+// TestRebuildFilter_OrdersChannelsWithinSectionByChannelOrder verifies
+// that within a section, channels with an explicit ChannelOrder > 0
+// sort ahead of un-annotated channels (input order), and that
+// annotated channels are themselves sorted by ChannelOrder ascending.
+// This is the config-mode (use_slack_sections=false) behavior driven
+// by the SectionDef "<pattern>:<N>" suffix syntax.
+func TestRebuildFilter_OrdersChannelsWithinSectionByChannelOrder(t *testing.T) {
+	// Inserted in deliberately scrambled input order. All in the
+	// same custom section "Eng" so the section-rank tie-breaker is
+	// what's being tested.
+	items := []ChannelItem{
+		{ID: "C1", Name: "alpha", Type: "channel", Section: "Eng", SectionOrder: 1, ChannelOrder: 0},
+		{ID: "C2", Name: "beta", Type: "channel", Section: "Eng", SectionOrder: 1, ChannelOrder: 2},
+		{ID: "C3", Name: "gamma", Type: "channel", Section: "Eng", SectionOrder: 1, ChannelOrder: 0},
+		{ID: "C4", Name: "delta", Type: "channel", Section: "Eng", SectionOrder: 1, ChannelOrder: 1},
+	}
+	m := New(items)
+
+	// Collect IDs in filtered (display) order.
+	var got []string
+	for _, idx := range m.filtered {
+		got = append(got, m.items[idx].ID)
+	}
+
+	// Expected: annotated first (C4 order=1, C2 order=2), then
+	// un-annotated in input order (C1, C3).
+	want := []string{"C4", "C2", "C1", "C3"}
+	if len(got) != len(want) {
+		t.Fatalf("filtered len = %d, want %d (got=%v)", len(got), len(want), got)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("position %d: got %q, want %q (full=%v)", i, got[i], want[i], got)
+		}
+	}
+}
+
+// TestRebuildFilter_NoChannelOrderPreservesInputOrder is a regression
+// guard: when every item has ChannelOrder == 0 (the default), the
+// existing input-order behavior must be preserved bit-for-bit.
+func TestRebuildFilter_NoChannelOrderPreservesInputOrder(t *testing.T) {
+	items := []ChannelItem{
+		{ID: "C1", Name: "alpha", Type: "channel", Section: "Eng", SectionOrder: 1},
+		{ID: "C2", Name: "beta", Type: "channel", Section: "Eng", SectionOrder: 1},
+		{ID: "C3", Name: "gamma", Type: "channel", Section: "Eng", SectionOrder: 1},
+	}
+	m := New(items)
+	var got []string
+	for _, idx := range m.filtered {
+		got = append(got, m.items[idx].ID)
+	}
+	want := []string{"C1", "C2", "C3"}
+	if len(got) != len(want) {
+		t.Fatalf("filtered len = %d, want %d (got=%v)", len(got), len(want), got)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("position %d: got %q, want %q", i, got[i], want[i])
+		}
+	}
+}
+
 // TestView_MutedChannelNoDot confirms that a muted channel never
 // renders the unread dot even when HasUnread=true. Slack's contract:
 // muted = no notification surface.

@@ -6,6 +6,8 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
+	"strings"
 
 	toml "github.com/pelletier/go-toml/v2"
 )
@@ -25,9 +27,37 @@ type Config struct {
 // SectionDef defines a sidebar section with channel name patterns.
 // Channels matching any pattern are placed in this section.
 // Patterns support simple glob matching (* for any characters).
+//
+// Each entry in Channels may optionally carry a per-channel sort
+// suffix of the form "<pattern>:<N>" where N is a non-negative
+// integer. Channels matching a pattern with an explicit N are placed
+// above un-annotated channels within the section, sorted by N
+// ascending. Example: channels = ["general:1", "alerts:2", "random"].
+// The ":N" syntax is only honored when use_slack_sections = false
+// (or as a fallback when Slack's section endpoint is unreachable);
+// in Slack-native mode, channel order is taken from Slack.
 type SectionDef struct {
 	Channels []string `toml:"channels"`
 	Order    int      `toml:"order"` // lower = higher in sidebar
+}
+
+// parseChannelPattern splits a "<pattern>:<N>" config entry into its
+// pattern and order components. If the suffix after the last ':' is
+// not a non-negative integer, the whole input is returned as the
+// pattern with order 0 (so e.g. accidentally-included colons in
+// patterns are treated as literal characters, not orders). Slack
+// channel names cannot contain ':', so well-formed configs are never
+// ambiguous.
+func parseChannelPattern(s string) (pattern string, order int) {
+	i := strings.LastIndex(s, ":")
+	if i < 0 {
+		return s, 0
+	}
+	n, err := strconv.Atoi(s[i+1:])
+	if err != nil || n < 0 {
+		return s, 0
+	}
+	return s[:i], n
 }
 
 type General struct {
@@ -225,11 +255,21 @@ func (c Config) TeamIDForDefaultWorkspace() (string, error) {
 // otherwise the global Sections apply. Returns "" if no pattern
 // matches.
 func (c Config) MatchSection(teamID, channelName string) string {
+	section, _ := c.MatchSectionAndOrder(teamID, channelName)
+	return section
+}
+
+// MatchSectionAndOrder is like MatchSection but also returns the
+// per-channel sort order encoded in the matching pattern's ":N"
+// suffix (see SectionDef). Returns ("", 0) when no pattern matches,
+// and (sectionName, 0) when the matching pattern has no explicit
+// order suffix.
+func (c Config) MatchSectionAndOrder(teamID, channelName string) (string, int) {
 	sections := c.Sections
 	if ws, ok := c.WorkspaceByTeamID(teamID); ok && len(ws.Sections) > 0 {
 		sections = ws.Sections
 	}
-	return matchSectionIn(sections, channelName)
+	return matchSectionAndOrderIn(sections, channelName)
 }
 
 // SectionOrder returns the Order field for the named section,
@@ -249,6 +289,15 @@ func (c Config) SectionOrder(teamID, sectionName string) int {
 // matchSectionIn walks sections in Order-ascending order and returns
 // the first section name whose patterns match channelName.
 func matchSectionIn(sections map[string]SectionDef, channelName string) string {
+	name, _ := matchSectionAndOrderIn(sections, channelName)
+	return name
+}
+
+// matchSectionAndOrderIn is the order-aware sibling of matchSectionIn.
+// It also returns the per-channel order encoded in the matching
+// pattern's ":N" suffix (0 if absent). Patterns are stripped of any
+// ":N" suffix before being passed to filepath.Match.
+func matchSectionAndOrderIn(sections map[string]SectionDef, channelName string) (string, int) {
 	type entry struct {
 		name     string
 		order    int
@@ -262,13 +311,14 @@ func matchSectionIn(sections map[string]SectionDef, channelName string) string {
 		return entries[i].order < entries[j].order
 	})
 	for _, e := range entries {
-		for _, pattern := range e.patterns {
+		for _, raw := range e.patterns {
+			pattern, chOrder := parseChannelPattern(raw)
 			if matched, _ := filepath.Match(pattern, channelName); matched {
-				return e.name
+				return e.name, chOrder
 			}
 		}
 	}
-	return ""
+	return "", 0
 }
 
 // EffectiveUseSlackSections returns whether Slack-native sidebar sections

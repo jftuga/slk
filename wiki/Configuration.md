@@ -40,6 +40,15 @@ max_image_cache_mb = 200
 channels = ["alerts", "ops", "*-alerts"]
 order = 1
 
+# Channels can carry an optional ":<N>" suffix to pin their order
+# within the section. Lower numbers sort higher. Entries without a
+# suffix fall after annotated ones, in the order they appear.
+# This syntax is only honored when use_slack_sections = false;
+# in Slack-native mode, channel order comes from Slack.
+[sections.Engineering]
+channels = ["eng-general:1", "eng-alerts:2", "eng-*"]
+order = 2
+
 # Per-workspace settings: keyed by a slug you choose at --add-workspace
 # time. team_id ties the slug to the underlying Slack workspace.
 [workspaces.work]
@@ -85,6 +94,30 @@ per-workspace, to opt into glob-based sections instead.
 Per-workspace `[workspaces.<slug>.sections.*]` blocks fully replace the
 global `[sections.*]` for that workspace. Workspaces that define no
 sections of their own fall back to the global table.
+
+### Ordering channels within a section
+
+Each entry in a section's `channels` list may carry an optional `:<N>`
+suffix where `N` is a non-negative integer. Channels matched by an
+annotated pattern sort ahead of channels matched by un-annotated
+patterns; among annotated channels, lower `N` wins; un-annotated
+channels keep the order Slack returned them in.
+
+```toml
+[sections.Engineering]
+channels = ["eng-general:1", "eng-alerts:2", "eng-*"]
+order = 2
+```
+
+In the example above, `#eng-general` is pinned to the top of the
+Engineering section, followed by `#eng-alerts`, followed by every
+other `eng-*` channel in Slack-API order.
+
+This syntax is only honored when `use_slack_sections = false` (or
+when Slack's section endpoint is unreachable and slk falls back to
+glob mode). In Slack-native mode, channel order within a section
+comes from Slack and the `:<N>` suffix is ignored along with the
+rest of the `[sections.*]` block.
 
 ### v1 limitations of Slack-native sections
 

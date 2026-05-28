@@ -62,10 +62,13 @@ func buildChannelItem(ch slack.Channel, wctx *WorkspaceContext, cfg config.Confi
 		}
 	}
 	var sectionOrder int
+	var channelOrder int
 	if section == "" {
-		section = cfg.MatchSection(teamID, ch.Name)
+		var matchedOrder int
+		section, matchedOrder = cfg.MatchSectionAndOrder(teamID, ch.Name)
 		if section != "" {
 			sectionOrder = cfg.SectionOrder(teamID, section)
+			channelOrder = matchedOrder
 		}
 	}
 
@@ -80,6 +83,7 @@ func buildChannelItem(ch slack.Channel, wctx *WorkspaceContext, cfg config.Confi
 		Type:         chType,
 		Section:      section,
 		SectionOrder: sectionOrder,
+		ChannelOrder: channelOrder,
 		IsMuted:      muted,
 	}
 	if ch.IsIM {

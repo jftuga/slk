@@ -195,6 +195,79 @@ func TestBuildChannelItem_StoreNil_UsesGlob(t *testing.T) {
 	}
 }
 
+func TestBuildChannelItem_GlobMatchPopulatesChannelOrder(t *testing.T) {
+	// Config-mode (no SectionStore): the "<pattern>:<N>" suffix on a
+	// channel entry should land on the resulting ChannelItem's
+	// ChannelOrder field, where the sidebar comparator picks it up.
+	cfg := config.Config{
+		Sections: map[string]config.SectionDef{
+			"Eng": {Channels: []string{"eng-general:1", "eng-*:5"}, Order: 1},
+		},
+	}
+	wctx := &WorkspaceContext{
+		SectionStore:      nil,
+		UserNames:         map[string]string{},
+		UserNamesByHandle: map[string]string{},
+		BotUserIDs:        map[string]bool{},
+	}
+	// "eng-general" matches the literal pattern first → order 1.
+	ch1 := slack.Channel{
+		GroupConversation: slack.GroupConversation{
+			Conversation: slack.Conversation{ID: "C1"},
+			Name:         "eng-general",
+		},
+	}
+	item1, _ := buildChannelItem(ch1, wctx, cfg, "T1")
+	if item1.Section != "Eng" {
+		t.Errorf("Section = %q, want Eng", item1.Section)
+	}
+	if item1.ChannelOrder != 1 {
+		t.Errorf("ChannelOrder = %d, want 1", item1.ChannelOrder)
+	}
+	// "eng-alerts" matches the glob → order 5.
+	ch2 := slack.Channel{
+		GroupConversation: slack.GroupConversation{
+			Conversation: slack.Conversation{ID: "C2"},
+			Name:         "eng-alerts",
+		},
+	}
+	item2, _ := buildChannelItem(ch2, wctx, cfg, "T1")
+	if item2.ChannelOrder != 5 {
+		t.Errorf("ChannelOrder = %d, want 5 (glob match)", item2.ChannelOrder)
+	}
+}
+
+func TestBuildChannelItem_SlackStoreWins_ChannelOrderZero(t *testing.T) {
+	// In Slack-native mode, ChannelOrder must remain 0 — the ":N"
+	// suffix syntax is a config-glob-only feature. Even if a config
+	// glob would have matched, the SectionStore claim short-circuits
+	// the lookup, and the resulting item carries no ChannelOrder.
+	cfg := config.Config{
+		Sections: map[string]config.SectionDef{
+			"Eng": {Channels: []string{"alerts-*:9"}, Order: 1},
+		},
+	}
+	wctx := &WorkspaceContext{
+		SectionStore:      bootstrappedStore(t, map[string][]string{"L_SLACK": {"C1"}}),
+		UserNames:         map[string]string{},
+		UserNamesByHandle: map[string]string{},
+		BotUserIDs:        map[string]bool{},
+	}
+	ch := slack.Channel{
+		GroupConversation: slack.GroupConversation{
+			Conversation: slack.Conversation{ID: "C1"},
+			Name:         "alerts-prod",
+		},
+	}
+	item, _ := buildChannelItem(ch, wctx, cfg, "T1")
+	if item.Section != "L_SLACK" {
+		t.Fatalf("precondition: Section = %q, want L_SLACK", item.Section)
+	}
+	if item.ChannelOrder != 0 {
+		t.Errorf("ChannelOrder = %d, want 0 in Slack-native mode", item.ChannelOrder)
+	}
+}
+
 func TestBuildChannelItem_StoreNotReady_UsesGlob(t *testing.T) {
 	cfg := config.Config{
 		Sections: map[string]config.SectionDef{

@@ -619,3 +619,106 @@ func TestEffectiveUseSlackSections_UnknownTeamUsesGlobal(t *testing.T) {
 		t.Errorf("unknown team should fall through to global=false")
 	}
 }
+
+func TestMatchSectionAndOrder_ExplicitOrder(t *testing.T) {
+	c := Config{
+		Sections: map[string]SectionDef{
+			"Eng": {Channels: []string{"eng-general:1", "eng-alerts:2"}, Order: 1},
+		},
+	}
+	if section, order := c.MatchSectionAndOrder("", "eng-general"); section != "Eng" || order != 1 {
+		t.Errorf(`MatchSectionAndOrder("eng-general") = (%q, %d), want ("Eng", 1)`, section, order)
+	}
+	if section, order := c.MatchSectionAndOrder("", "eng-alerts"); section != "Eng" || order != 2 {
+		t.Errorf(`MatchSectionAndOrder("eng-alerts") = (%q, %d), want ("Eng", 2)`, section, order)
+	}
+}
+
+func TestMatchSectionAndOrder_NoOrderDefaultsZero(t *testing.T) {
+	c := Config{
+		Sections: map[string]SectionDef{
+			"Eng": {Channels: []string{"eng-general"}, Order: 1},
+		},
+	}
+	if section, order := c.MatchSectionAndOrder("", "eng-general"); section != "Eng" || order != 0 {
+		t.Errorf(`MatchSectionAndOrder = (%q, %d), want ("Eng", 0)`, section, order)
+	}
+}
+
+func TestMatchSectionAndOrder_GlobPattern(t *testing.T) {
+	c := Config{
+		Sections: map[string]SectionDef{
+			"Team": {Channels: []string{"team-*:5"}, Order: 1},
+		},
+	}
+	if section, order := c.MatchSectionAndOrder("", "team-alpha"); section != "Team" || order != 5 {
+		t.Errorf(`MatchSectionAndOrder("team-alpha") = (%q, %d), want ("Team", 5)`, section, order)
+	}
+}
+
+func TestMatchSectionAndOrder_NonNumericSuffixTreatedAsLiteral(t *testing.T) {
+	// "weird:abc" — suffix after colon is not an integer. Whole thing
+	// is the pattern; order defaults to 0. Slack channel names can't
+	// contain colons, so this match will only succeed if a user
+	// literally configures such a pattern; we don't error on it.
+	c := Config{
+		Sections: map[string]SectionDef{
+			"Misc": {Channels: []string{"weird:abc"}, Order: 1},
+		},
+	}
+	// The literal pattern matches the literal string "weird:abc".
+	if section, order := c.MatchSectionAndOrder("", "weird:abc"); section != "Misc" || order != 0 {
+		t.Errorf(`MatchSectionAndOrder("weird:abc") = (%q, %d), want ("Misc", 0)`, section, order)
+	}
+	// And "weird" alone does NOT match (we did not split off the :abc).
+	if section, _ := c.MatchSectionAndOrder("", "weird"); section != "" {
+		t.Errorf(`MatchSectionAndOrder("weird") = %q, want "" (no split for non-numeric suffix)`, section)
+	}
+}
+
+func TestMatchSectionAndOrder_NoMatchReturnsEmpty(t *testing.T) {
+	c := Config{
+		Sections: map[string]SectionDef{
+			"Eng": {Channels: []string{"eng-*:1"}, Order: 1},
+		},
+	}
+	if section, order := c.MatchSectionAndOrder("", "random"); section != "" || order != 0 {
+		t.Errorf(`MatchSectionAndOrder("random") = (%q, %d), want ("", 0)`, section, order)
+	}
+}
+
+func TestMatchSection_BackwardCompatWithOrderSuffix(t *testing.T) {
+	// Existing MatchSection must keep working when patterns use the
+	// new ":N" suffix syntax — it just discards the order.
+	c := Config{
+		Sections: map[string]SectionDef{
+			"Eng": {Channels: []string{"eng-general:3"}, Order: 1},
+		},
+	}
+	if got := c.MatchSection("", "eng-general"); got != "Eng" {
+		t.Errorf(`MatchSection("eng-general") = %q, want "Eng"`, got)
+	}
+}
+
+func TestMatchSectionAndOrder_WorkspaceOverride(t *testing.T) {
+	c := Config{
+		Sections: map[string]SectionDef{
+			"GlobalEng": {Channels: []string{"eng-*:1"}, Order: 1},
+		},
+		Workspaces: map[string]Workspace{
+			"work": {
+				TeamID: "T01",
+				Sections: map[string]SectionDef{
+					"WorkAlerts": {Channels: []string{"alerts:7"}, Order: 1},
+				},
+			},
+		},
+	}
+	if section, order := c.MatchSectionAndOrder("T01", "alerts"); section != "WorkAlerts" || order != 7 {
+		t.Errorf(`MatchSectionAndOrder("T01","alerts") = (%q, %d), want ("WorkAlerts", 7)`, section, order)
+	}
+	// Global is shadowed for T01.
+	if section, _ := c.MatchSectionAndOrder("T01", "eng-foo"); section != "" {
+		t.Errorf(`MatchSectionAndOrder("T01","eng-foo") = %q, want "" (workspace shadows global)`, section)
+	}
+}
