@@ -686,9 +686,34 @@ func run() error {
 			SendMsg:     send,
 		}
 	}
+	// buildPlaceCtx mirrors buildImgCtx for emoji-image placements.
+	// The Fetcher is the same instance (one cache, one prerender
+	// pipeline). SendMsg dispatches EmojiImageReadyMsg through
+	// bubbletea so reducers can invalidate per-surface caches.
+	buildPlaceCtx := func(send func(tea.Msg)) emojiwidth.PlaceContext {
+		return emojiwidth.PlaceContext{
+			Fetcher: imageFetcher,
+			SendMsg: func(v any) {
+				if send != nil {
+					if msg, ok := v.(tea.Msg); ok {
+						send(msg)
+					}
+				}
+			},
+		}
+	}
 	app.SetImageContext(buildImgCtx(nil))
 	app.SetImageFetcher(imageFetcher)
 	app.SetImageProtocol(proto)
+
+	// Emoji-image rendering. Active only on kitty (per ImageMode
+	// gate set earlier in startup). When inactive the messages pane
+	// uses the legacy glyph/shortcode-text rendering path.
+	app.SetEmojiContext(messages.EmojiContext{
+		PlaceCtx: buildPlaceCtx(nil), // SendMsg refreshed below once Program exists
+		Cells:    cfg.Appearance.EmojiCells,
+		Customs:  nil, // populated by CustomEmojisLoadedMsg
+	})
 
 	// Apply user-configured workspace ordering to tokens before
 	// building the rail. The rail and digit-key (1-9) mapping both
@@ -1422,6 +1447,14 @@ func run() error {
 	// rendering kicks off prefetches whose completions would otherwise
 	// be dropped on the floor.
 	app.SetImageContext(buildImgCtx(p.Send))
+	// Refresh the emoji PlaceContext with the real SendMsg so cold-
+	// path emoji fetches dispatch EmojiImageReadyMsg into the loop
+	// and surfaces re-render with the now-warm placement.
+	app.SetEmojiContext(messages.EmojiContext{
+		PlaceCtx: buildPlaceCtx(p.Send),
+		Cells:    cfg.Appearance.EmojiCells,
+		Customs:  nil, // CustomEmojisLoadedMsg fills this in
+	})
 
 	// Wire avatar-ready callback so the lazy AvatarFunc path's
 	// background fetches invalidate the messages/thread caches and
