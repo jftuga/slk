@@ -361,3 +361,100 @@ func TestSelection_FirstContentRowAnchorsAtFirstMessage(t *testing.T) {
 		t.Fatalf("expected first-message content; got %q", text)
 	}
 }
+
+// TestSelection_ExtendUnchangedDoesNotDirty guards the mouse-drag
+// perf hot path: with MouseModeCellMotion the terminal emits a
+// MouseMotionMsg for every cell the cursor traverses while the
+// button is held, and many of those cells resolve to the same
+// snapped end-anchor. Bumping m.version on each one invalidates
+// the bordered-messages render cache for no reason. ExtendSelectionAt
+// must early-out (no version bump) when the resolved end anchor
+// matches the current m.selRange.End.
+func TestSelection_ExtendUnchangedDoesNotDirty(t *testing.T) {
+	m := newTestModel(60)
+	m.BeginSelectionAt(firstContentY(m), 0)
+	// First extend establishes a real end anchor and dirties.
+	m.ExtendSelectionAt(firstContentY(m)+1, 10)
+	end := m.selRange.End
+	beforeVersion := m.version
+
+	// Re-call with the exact same coordinates: the resolved end
+	// anchor must be identical and no version bump should occur.
+	m.ExtendSelectionAt(firstContentY(m)+1, 10)
+
+	if m.selRange.End != end {
+		t.Fatalf("selRange.End drifted across identical Extend: before=%+v after=%+v", end, m.selRange.End)
+	}
+	if m.version != beforeVersion {
+		t.Errorf("ExtendSelectionAt with unchanged end anchor must not bump version (before=%d after=%d)", beforeVersion, m.version)
+	}
+}
+
+// TestSelection_MutationsDoNotBumpVersion is the perf invariant for
+// the selection-as-post-cache-overlay refactor: the App-level
+// bordered-messages cache (keyed on messagepane.Version) must
+// survive ANY selection mutation, including character-granularity
+// extends where the resolved end anchor genuinely changes every
+// cell. The selection is now applied as a post-pass over the
+// cached bordered output (see Model.ApplySelectionToBordered),
+// so Begin / Extend / End / Clear must NOT bump version.
+func TestSelection_MutationsDoNotBumpVersion(t *testing.T) {
+	m := newTestModel(60)
+	_ = m.View(40, 60) // prime cache
+	v0 := m.version
+
+	m.BeginSelectionAt(firstContentY(m), 0)
+	if m.version != v0 {
+		t.Errorf("BeginSelectionAt bumped version: before=%d after=%d", v0, m.version)
+	}
+	// Drag character-by-character — each Extend resolves to a
+	// distinct end anchor (Col advances by 1 every call).
+	for col := 1; col <= 8; col++ {
+		m.ExtendSelectionAt(firstContentY(m)+1, col)
+		if m.version != v0 {
+			t.Errorf("ExtendSelectionAt(col=%d) bumped version: before=%d after=%d", col, v0, m.version)
+		}
+	}
+	_, _ = m.EndSelection()
+	if m.version != v0 {
+		t.Errorf("EndSelection bumped version: before=%d after=%d", v0, m.version)
+	}
+	m.ClearSelection()
+	if m.version != v0 {
+		t.Errorf("ClearSelection bumped version: before=%d after=%d", v0, m.version)
+	}
+}
+
+// TestApplySelectionToBordered_OverlaysOnContentRows is a unit
+// test for the new post-cache overlay path. The function operates
+// on a bordered-output string (top border row + chrome rows +
+// message-area rows, sided by left/right border columns), and must:
+//   - leave rows above the message area (border + chrome) untouched
+//   - apply the selection style inside the message-area band,
+//     shifted by leftBorderCols so the border column at col 0 is
+//     preserved verbatim.
+//
+// Returns the bordered string with the SelectionStyle ANSI sequence
+// injected on the row(s) intersected by the selection.
+func TestApplySelectionToBordered_OverlaysOnContentRows(t *testing.T) {
+	m := newTestModel(60)
+	bare := m.ViewBare(40, 60)
+	// No selection set — function must be an identity.
+	if got := m.ApplySelectionToBordered(bare, 0, 0); got != bare {
+		t.Fatal("ApplySelectionToBordered with no selection must return input unchanged")
+	}
+
+	// Now set a selection that covers a known content row (firstContentY+1
+	// is one row past the date separator -- inside msg1).
+	y := firstContentY(m) + 1
+	m.BeginSelectionAt(y, 5)
+	m.ExtendSelectionAt(y, 15)
+	// View() applies the overlay internally; that's our reference output
+	// for the unbordered case (topBorderRows=0, leftBorderCols=0).
+	withOverlayViaView := m.View(40, 60)
+	withOverlayViaApply := m.ApplySelectionToBordered(bare, 0, 0)
+	if withOverlayViaApply != withOverlayViaView {
+		t.Fatalf("ApplySelectionToBordered(0,0) must match View() overlay output\nwant:\n%q\ngot:\n%q",
+			withOverlayViaView, withOverlayViaApply)
+	}
+}

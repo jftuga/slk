@@ -2373,7 +2373,14 @@ func (m *Model) BeginSelectionAt(viewportY, x int) {
 	}
 	m.selRange = selection.Range{Start: a, End: a, Active: true}
 	m.hasSelection = true
-	m.dirty()
+	// No m.dirty() here: the App-layer bordered render cache stores
+	// the SELECTION-FREE output (see ViewBare + ApplySelectionToBordered),
+	// so selection mutations must not bump Version() -- otherwise we
+	// invalidate the cache on every cell of mouse-drag motion and pay
+	// the multi-pass O(height x width) ansi re-border cost per cell.
+	// Bubbletea's main loop re-runs App.View() after every Update, so
+	// the new overlay is visible on the very next frame without needing
+	// a Version bump.
 }
 
 // ExtendSelectionAt updates the End anchor of the active selection.
@@ -2392,8 +2399,13 @@ func (m *Model) ExtendSelectionAt(viewportY, x int) {
 	if !ok {
 		return
 	}
+	if a == m.selRange.End {
+		return
+	}
 	m.selRange.End = a
-	m.dirty()
+	// No m.dirty() here either -- see BeginSelectionAt for the rationale.
+	// The selection lives in ApplySelectionToBordered's post-cache pass,
+	// which reads selRange directly each frame.
 }
 
 // EndSelection finalizes the drag, returning the plain-text contents of
@@ -2408,11 +2420,9 @@ func (m *Model) EndSelection() (string, bool) {
 	if m.selRange.IsEmpty() {
 		m.hasSelection = false
 		m.selRange = selection.Range{}
-		m.dirty()
 		return "", false
 	}
 	text := m.SelectionText()
-	m.dirty()
 	if text == "" {
 		return "", false
 	}
@@ -2426,7 +2436,6 @@ func (m *Model) ClearSelection() {
 	}
 	m.hasSelection = false
 	m.selRange = selection.Range{}
-	m.dirty()
 }
 
 // HasSelection reports whether a selection is currently active or
@@ -2512,7 +2521,13 @@ func (m *Model) SelectionText() string {
 	return strings.TrimRight(b.String(), "\n")
 }
 
-func (m *Model) View(height, width int) string {
+// viewInternal is the body shared by View and ViewBare. When
+// applySelection is true, the selection-highlight overlay is applied
+// to the inner content before the scrollbar overlay (preserving the
+// pre-refactor render order). When false, the overlay is skipped so
+// the App-layer cache can store a selection-free bordered output and
+// run ApplySelectionToBordered as a cheap post-pass.
+func (m *Model) viewInternal(height, width int, applySelection bool) string {
 	// Chrome (header + separator) is cached; only rebuilt on width / channel
 	// name / topic change. This avoids per-keypress strings.Repeat + lipgloss
 	// renders that don't depend on the selection.
@@ -2875,27 +2890,32 @@ func (m *Model) View(height, width int) string {
 	}
 
 	// Scroll indicators replace the first / last line when applicable.
-	// Track which rows were overridden so the selection overlay knows to
-	// leave them alone -- otherwise the overlay would re-compose the
-	// indicator line using the underlying message's plain text and
-	// corrupt the indicator.
-	overrodeFirst := false
-	overrodeLast := false
+	// applySelectionToRows recomputes the same conditions (m.loading and
+	// m.yOffset+msgAreaHeight < m.totalLines) so it can skip the override
+	// rows without us threading skip flags through -- this is what lets
+	// the bordered post-pass (ApplySelectionToBordered, which operates
+	// on cached output and so doesn't see this scope) protect indicators
+	// using the same logic.
 	if m.loading && len(visible) > 0 {
 		// Render the hint fresh per frame -- it MUST reflect the
 		// current m.spinnerFrame, which advances independently of
 		// the cache rebuild signals (width / message count). See
 		// buildCacheStyles' comment for the rationale.
 		visible[0] = m.renderLoadingOlderHint(width)
-		overrodeFirst = true
 	}
 	if m.yOffset+msgAreaHeight < m.totalLines && len(visible) > 0 {
 		visible[len(visible)-1] = m.cacheMoreBelow
-		overrodeLast = true
 	}
 
-	if m.hasSelection {
-		visible = m.applySelectionOverlay(visible, overrodeFirst, overrodeLast)
+	// Selection overlay is intentionally NOT applied here when applySelection
+	// is false. The App layer caches the bordered form of this output (keyed
+	// on Version) and overlays the selection via ApplySelectionToBordered as
+	// a cheap post-pass, so selection-only mutations no longer bust the
+	// bordered render cache. The top-level View() public method below sets
+	// applySelection=true so direct callers (tests, anything not going
+	// through the bordered cache) still see the highlighted output.
+	if applySelection && m.hasSelection {
+		m.applySelectionToRows(visible, 0, 0, msgAreaHeight)
 	}
 
 	// Overlay a 1-col scrollbar on the right of the message area when content
@@ -2907,38 +2927,73 @@ func (m *Model) View(height, width int) string {
 	return chrome + "\n" + strings.Join(visible, "\n")
 }
 
-// applySelectionOverlay re-composes lines that intersect the active
-// selection range. linesNormal supplies the original styled prefix and
-// suffix; the selected interior is rendered through styles.SelectionStyle
-// over the plain-text segment so the highlight is uniform.
+// View renders the messages pane with the selection-highlight overlay
+// applied to the inner content (unbordered). Direct callers (tests,
+// callers not going through the App-layer bordered cache) should call
+// View; the App layer calls ViewBare instead so the cached bordered
+// output stays selection-free and the cheap ApplySelectionToBordered
+// post-pass paints the selection at draw time.
+func (m *Model) View(height, width int) string {
+	return m.viewInternal(height, width, true)
+}
+
+// ViewBare renders the messages pane WITHOUT the selection-highlight
+// overlay. Used by the App-layer bordered render cache: caching the
+// selection-free output and applying the overlay via
+// ApplySelectionToBordered as a post-pass means a mouse-drag selection
+// no longer invalidates the bordered render every cell of motion.
+func (m *Model) ViewBare(height, width int) string {
+	return m.viewInternal(height, width, false)
+}
+
+// applySelectionToRows is the shared selection-overlay loop. It
+// paints the rows in `lines` covered by the active selection,
+// shifting display columns by leftColOffset to absorb any outer
+// left border.
 //
-// visible is mutated in place when possible. The selection's plain
-// columns are translated to display columns by adding the entry's
-// contentColOffset.
+// startRow is the index in `lines` where the message-area band
+// begins:
+//   - 0 when operating on the msg-area-only slice produced inside
+//     View() (called by the View wrapper at chromeHeight=0 since
+//     the slice itself contains only msg-area rows -- chrome and
+//     border live in separate strings at that point).
+//   - topBorderRows + chromeHeight when operating on the bordered
+//     output produced by the App layer (see ApplySelectionToBordered).
 //
-// skipFirst / skipLast tell the overlay to leave row 0 / row N-1 alone
-// when those rows have been replaced with scroll indicators (loading
-// hint, "more below"). Without this guard the overlay would re-compose
-// the indicator line from the underlying entry's plain text, corrupting
-// the indicator.
-func (m *Model) applySelectionOverlay(visible []string, skipFirst, skipLast bool) []string {
+// msgAreaHeight is the number of message-area rows. Scroll-indicator
+// rows (loading hint at vRow=0 when m.loading, "more below" at
+// vRow=msgAreaHeight-1 when content exceeds the viewport) are
+// skipped so the overlay does not corrupt them.
+//
+// Mutates lines in place. No-op when !m.hasSelection or the
+// selection resolves to empty.
+func (m *Model) applySelectionToRows(lines []string, startRow, leftColOffset, msgAreaHeight int) {
+	if !m.hasSelection {
+		return
+	}
 	loA, hiA := m.selRange.Normalize()
 	loLine, loCol, ok1 := m.resolveAnchor(loA)
 	hiLine, hiCol, ok2 := m.resolveAnchor(hiA)
 	if !ok1 || !ok2 {
-		return visible
+		return
 	}
 	if loLine > hiLine || (loLine == hiLine && loCol >= hiCol) {
-		return visible
+		return
 	}
+	overrodeFirst := m.loading
+	overrodeLast := m.yOffset+msgAreaHeight < m.totalLines
 
 	selStyle := styles.SelectionStyle()
 
-	for row := 0; row < len(visible); row++ {
-		if (row == 0 && skipFirst) || (row == len(visible)-1 && skipLast) {
+	for vRow := 0; vRow < msgAreaHeight; vRow++ {
+		row := startRow + vRow
+		if row < 0 || row >= len(lines) {
 			continue
 		}
-		absLine := m.yOffset + row
+		if (vRow == 0 && overrodeFirst) || (vRow == msgAreaHeight-1 && overrodeLast) {
+			continue
+		}
+		absLine := m.yOffset + vRow
 		if absLine < loLine || absLine > hiLine {
 			continue
 		}
@@ -2960,10 +3015,10 @@ func (m *Model) applySelectionOverlay(visible []string, skipFirst, skipLast bool
 			continue
 		}
 		plain := e.linesPlain[j]
-		styled := visible[row]
+		styled := lines[row]
 
 		// from / to are PLAIN columns. They become display columns by
-		// adding contentColOffset.
+		// adding contentColOffset + leftColOffset.
 		from := 0
 		to := displayWidthOfPlain(plain)
 		if absLine == loLine {
@@ -2981,9 +3036,8 @@ func (m *Model) applySelectionOverlay(visible []string, skipFirst, skipLast bool
 		if from >= to {
 			continue
 		}
-		// Translate to display columns.
-		dispFrom := from + e.contentColOffset
-		dispTo := to + e.contentColOffset
+		dispFrom := from + e.contentColOffset + leftColOffset
+		dispTo := to + e.contentColOffset + leftColOffset
 
 		styledWidth := ansi.StringWidth(styled)
 		if dispFrom >= styledWidth {
@@ -2995,9 +3049,36 @@ func (m *Model) applySelectionOverlay(visible []string, skipFirst, skipLast bool
 		prefix := ansi.Cut(styled, 0, dispFrom)
 		suffix := ansi.Cut(styled, dispTo, styledWidth)
 		seg := sliceColumns(plain, from, to)
-		visible[row] = prefix + selStyle.Render(seg) + suffix
+		lines[row] = prefix + selStyle.Render(seg) + suffix
 	}
-	return visible
+}
+
+// ApplySelectionToBordered overlays the active selection on top of
+// a pre-bordered, pre-cached pane output produced by the App layer.
+// Splitting the overlay out of View() lets the App layer cache the
+// (selection-free) bordered output keyed on messagepane.Version()
+// and survive selection-only mutations: the cache key no longer
+// churns on every cell of mouse-drag motion, which used to invalidate
+// the bordered render (a multi-pass O(height x width) ansi-aware
+// re-render) on every cell.
+//
+// topBorderRows is the number of border rows above the chrome
+// (1 for the standard top-bordered panel). leftBorderCols is the
+// number of border columns at the start of each row (1 for the
+// standard side-bordered panel).
+//
+// No-op when there is no active selection or the model has not
+// rendered yet (lastViewHeight == 0).
+func (m *Model) ApplySelectionToBordered(bordered string, topBorderRows, leftBorderCols int) string {
+	if !m.hasSelection {
+		return bordered
+	}
+	if m.lastViewHeight <= 0 {
+		return bordered
+	}
+	lines := strings.Split(bordered, "\n")
+	m.applySelectionToRows(lines, topBorderRows+m.chromeHeight, leftBorderCols, m.lastViewHeight)
+	return strings.Join(lines, "\n")
 }
 
 // DateFromTS returns the local-day date string ("2006-01-02") for a

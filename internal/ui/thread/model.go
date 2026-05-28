@@ -858,6 +858,15 @@ func (m *Model) ExtendSelectionAt(viewportY, x int) {
 	if !ok {
 		return
 	}
+	// Perf: MouseModeCellMotion fires a MouseMotionMsg for every
+	// cell traversed while the button is held, and many of those
+	// cells resolve (via anchorAt) to the same end anchor. Bumping
+	// m.version unconditionally would bust the thread-pane render
+	// cache on every motion event. Skip the dirty when nothing
+	// actually changed.
+	if a == m.selRange.End {
+		return
+	}
 	m.selRange.End = a
 	m.dirty()
 }

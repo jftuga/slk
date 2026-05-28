@@ -343,3 +343,159 @@ func TestApp_ToggleSidebarClearsSelection(t *testing.T) {
 		t.Fatal("ToggleSidebar must clear selection")
 	}
 }
+
+// drainBatchCmds is like drainBatch but returns the leaf tea.Cmds
+// instead of invoking them. Lets tests inspect a batch for the
+// presence of a specific Cmd-shape (e.g. a tea.Tick) without
+// triggering its side effects. Built by walking the outermost
+// BatchMsg only -- nested batches are flattened the same way.
+func drainBatchCmds(cmd tea.Cmd) []tea.Cmd {
+	if cmd == nil {
+		return nil
+	}
+	msg := cmd()
+	if batch, ok := msg.(tea.BatchMsg); ok {
+		return []tea.Cmd(batch)
+	}
+	// Single-msg cmd: re-wrap so callers can still invoke it.
+	return []tea.Cmd{func() tea.Msg { return msg }}
+}
+
+// TestDrag_MotionCoalescing_DefersExtendSelectionAt is the perf
+// invariant for the motion-coalescing flush tick: a MouseMotionMsg
+// must NOT immediately call ExtendSelectionAt on the panel. It
+// latches the cursor position and schedules a single flush tick
+// (motionFlushTickMsg) that, when fired, applies the latest latched
+// position. Bubbletea's main loop delivers MouseMotionMsg at the
+// terminal's mouse-reporting rate (often >100 Hz) — coalescing
+// caps the work done per cell at ~60 Hz.
+func TestDrag_MotionCoalescing_DefersExtendSelectionAt(t *testing.T) {
+	a := newTestAppWithMessages(t)
+	pressX := a.layout.sidebarEnd + 2
+	pressY := 4
+	_, _ = a.Update(tea.MouseClickMsg{X: pressX, Y: pressY, Button: tea.MouseLeft})
+
+	// Precondition: Click started a selection (Begin sets selRange
+	// to {Start, Start}) but SelectionText is empty since End == Start.
+	if !a.messagepane.HasSelection() {
+		t.Fatal("precondition: Click must Begin a selection")
+	}
+	if got := a.messagepane.SelectionText(); got != "" {
+		t.Fatalf("precondition: Begin must leave selection empty; got %q", got)
+	}
+
+	// Motion -- with coalescing this MUST NOT extend the selection
+	// immediately. The pane's SelectionText stays empty.
+	_, cmd := a.Update(tea.MouseMotionMsg{X: pressX + 10, Y: pressY + 1, Button: tea.MouseLeft})
+	if got := a.messagepane.SelectionText(); got != "" {
+		t.Errorf("MouseMotionMsg must defer ExtendSelectionAt (coalesced); got SelectionText=%q", got)
+	}
+
+	// And it MUST have returned a Cmd that, when invoked, produces a
+	// motionFlushTickMsg (the deferred extend trigger).
+	var sawFlushTickProducer bool
+	for _, c := range drainBatchCmds(cmd) {
+		if _, ok := c().(motionFlushTickMsg); ok {
+			sawFlushTickProducer = true
+		}
+	}
+	if !sawFlushTickProducer {
+		t.Fatalf("expected a motionFlushTickMsg producer in the returned cmd")
+	}
+
+	// Sending motionFlushTickMsg explicitly applies the latched
+	// position; selection should now be non-empty.
+	_, _ = a.Update(motionFlushTickMsg{})
+	if got := a.messagepane.SelectionText(); got == "" {
+		t.Errorf("motionFlushTickMsg must apply latched position; SelectionText still empty")
+	}
+}
+
+// TestDrag_MotionCoalescing_ReleaseFlushesPending pins the contract
+// that MouseReleaseMsg force-flushes any pending motion before
+// finalizing, so the clipboard captures the most recent cursor
+// position even if the flush tick hasn't fired yet.
+func TestDrag_MotionCoalescing_ReleaseFlushesPending(t *testing.T) {
+	a := newTestAppWithMessages(t)
+	pressX := a.layout.sidebarEnd + 2
+	pressY := 4
+	_, _ = a.Update(tea.MouseClickMsg{X: pressX, Y: pressY, Button: tea.MouseLeft})
+	_, _ = a.Update(tea.MouseMotionMsg{X: pressX + 10, Y: pressY + 1, Button: tea.MouseLeft})
+	// NO motionFlushTickMsg sent -- mirrors the "user releases inside
+	// the 16 ms window" case.
+	_, cmd := a.Update(tea.MouseReleaseMsg{X: pressX + 10, Y: pressY + 1, Button: tea.MouseLeft})
+
+	var sawClipboard bool
+	for _, m := range drainBatch(cmd) {
+		if payload, ok := looksLikeSetClipboardMsg(m); ok && payload != "" {
+			sawClipboard = true
+		}
+	}
+	if !sawClipboard {
+		t.Errorf("Release must drain pending motion and emit clipboard cmd; got drained=%v", drainBatch(cmd))
+	}
+}
+
+// TestDrag_MotionCoalescing_OneTickPerBurst pins the coalescing
+// invariant: multiple MouseMotionMsg events in a row schedule AT
+// MOST one motionFlushTickMsg (the first one). Subsequent motions
+// only update the latched pending position.
+func TestDrag_MotionCoalescing_OneTickPerBurst(t *testing.T) {
+	a := newTestAppWithMessages(t)
+	pressX := a.layout.sidebarEnd + 2
+	pressY := 4
+	_, _ = a.Update(tea.MouseClickMsg{X: pressX, Y: pressY, Button: tea.MouseLeft})
+
+	countFlush := func(cmd tea.Cmd) int {
+		n := 0
+		for _, c := range drainBatchCmds(cmd) {
+			if _, ok := c().(motionFlushTickMsg); ok {
+				n++
+			}
+		}
+		return n
+	}
+
+	_, cmd1 := a.Update(tea.MouseMotionMsg{X: pressX + 1, Y: pressY + 1, Button: tea.MouseLeft})
+	_, cmd2 := a.Update(tea.MouseMotionMsg{X: pressX + 2, Y: pressY + 1, Button: tea.MouseLeft})
+	_, cmd3 := a.Update(tea.MouseMotionMsg{X: pressX + 3, Y: pressY + 1, Button: tea.MouseLeft})
+
+	if got := countFlush(cmd1); got != 1 {
+		t.Errorf("first motion in burst: want 1 motionFlushTickMsg producer; got %d", got)
+	}
+	if got := countFlush(cmd2); got != 0 {
+		t.Errorf("second motion in burst: want 0 flush producers (already scheduled); got %d", got)
+	}
+	if got := countFlush(cmd3); got != 0 {
+		t.Errorf("third motion in burst: want 0 flush producers; got %d", got)
+	}
+}
+
+// TestDrag_MotionCoalescing_TickAllowsReschedule pins the
+// flushScheduled latch reset on tick: after a motionFlushTickMsg
+// fires, the next MouseMotionMsg must be allowed to schedule a
+// fresh tick. Without this, mouse motion would freeze after the
+// first burst.
+func TestDrag_MotionCoalescing_TickAllowsReschedule(t *testing.T) {
+	a := newTestAppWithMessages(t)
+	pressX := a.layout.sidebarEnd + 2
+	pressY := 4
+	_, _ = a.Update(tea.MouseClickMsg{X: pressX, Y: pressY, Button: tea.MouseLeft})
+
+	// First motion schedules a tick.
+	_, _ = a.Update(tea.MouseMotionMsg{X: pressX + 1, Y: pressY + 1, Button: tea.MouseLeft})
+	// Fire the tick -- should reset the flushScheduled latch.
+	_, _ = a.Update(motionFlushTickMsg{})
+
+	// Next motion must schedule a new tick.
+	_, cmd := a.Update(tea.MouseMotionMsg{X: pressX + 2, Y: pressY + 1, Button: tea.MouseLeft})
+	var sawFlush bool
+	for _, c := range drainBatchCmds(cmd) {
+		if _, ok := c().(motionFlushTickMsg); ok {
+			sawFlush = true
+		}
+	}
+	if !sawFlush {
+		t.Errorf("post-tick motion must schedule a new motionFlushTickMsg; cmd produced no flush tick")
+	}
+}

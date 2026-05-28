@@ -165,3 +165,30 @@ func TestThreadSelection_FirstContentRowAnchorsAtFirstReply(t *testing.T) {
 		t.Fatalf("expected first-reply content; got %q", text)
 	}
 }
+
+// TestThreadSelection_ExtendUnchangedDoesNotDirty mirrors the messages-
+// pane perf guard: with MouseModeCellMotion the terminal emits a
+// MouseMotionMsg for every cell traversed while the button is held,
+// and many of those resolve to the same end anchor. Bumping
+// m.version on each one needlessly invalidates the thread-pane
+// render cache. ExtendSelectionAt must early-out when the resolved
+// end anchor matches the current m.selRange.End.
+func TestThreadSelection_ExtendUnchangedDoesNotDirty(t *testing.T) {
+	m := newTestThread()
+	m.BeginSelectionAt(firstContentY(m), 0)
+	// First extend establishes a real end anchor and dirties.
+	m.ExtendSelectionAt(firstContentY(m)+1, 10)
+	end := m.selRange.End
+	beforeVersion := m.version
+
+	// Re-call with the exact same coordinates: the resolved end
+	// anchor must be identical and no version bump should occur.
+	m.ExtendSelectionAt(firstContentY(m)+1, 10)
+
+	if m.selRange.End != end {
+		t.Fatalf("selRange.End drifted across identical Extend: before=%+v after=%+v", end, m.selRange.End)
+	}
+	if m.version != beforeVersion {
+		t.Errorf("ExtendSelectionAt with unchanged end anchor must not bump version (before=%d after=%d)", beforeVersion, m.version)
+	}
+}

@@ -47,6 +47,16 @@ import (
 // autoScrollActive is the once-claim guard for the edge-autoscroll
 // tea.Tick chain; ClaimAutoScroll returns true exactly once until
 // ClearAutoScroll resets it.
+//
+// pendingX/Y/hasPending + flushScheduled implement motion coalescing.
+// MouseMotionMsg latches the latest cursor position into pending* and
+// schedules a single motionFlushTickMsg at most once per
+// motionFlushInterval. The tick applies the latched position via
+// panel.ExtendSelectionAt -- collapsing a burst of cell-motion events
+// (terminals routinely fire >100 Hz; some 1000 Hz) into one selection
+// update per tick. MouseReleaseMsg force-flushes pending so the final
+// selection captures the most recent cursor cell even if the tick has
+// not fired yet.
 type dragState struct {
 	panel            Panel
 	pressX, pressY   int
@@ -54,6 +64,10 @@ type dragState struct {
 	moved            bool
 	autoScrollActive bool
 	clickedMessage   bool
+
+	pendingX, pendingY int
+	hasPending         bool
+	flushScheduled     bool
 }
 
 func newDragState() *dragState { return &dragState{} }
@@ -140,6 +154,26 @@ func autoScrollTickCmd() tea.Cmd {
 	})
 }
 
+// motionFlushInterval is the cadence for the mouse-motion coalescing
+// flush tick. 16ms = ~60 Hz: fast enough that selection still feels
+// instantaneous, slow enough to collapse the >100 Hz cell-motion
+// stream most terminals emit while a button is held into a single
+// ExtendSelectionAt + render per tick.
+const motionFlushInterval = 16 * time.Millisecond
+
+// motionFlushTickMsg is the tick that drains dragState.hasPending
+// into the panel's selection. Scheduled by the MouseMotionMsg arm
+// (at most once per motionFlushInterval via flushScheduled).
+type motionFlushTickMsg struct{}
+
+// motionFlushTickCmd schedules the next motionFlushTickMsg. See
+// Handle's MouseMotionMsg / motionFlushTickMsg arms.
+func motionFlushTickCmd() tea.Cmd {
+	return tea.Tick(motionFlushInterval, func(time.Time) tea.Msg {
+		return motionFlushTickMsg{}
+	})
+}
+
 // Handle is the drag-FSM reducer for App.Update (Phase 4c). Owns
 // the three Update arms that read/mutate drag state:
 //
@@ -172,19 +206,29 @@ func (d *dragState) Handle(a *App, msg tea.Msg) (tea.Cmd, bool) {
 			return nil, true
 		}
 		panel, px, py, _ := a.panelAt(m.X, m.Y)
-		// Clamp to the originating pane: if the cursor leaves the
-		// pane, pin extension at the last known coordinates inside it.
+		// Drag bookkeeping (lastX/lastY/moved) MUST run every motion
+		// event even when the panel-level ExtendSelectionAt is deferred
+		// to the flush tick: MouseReleaseMsg branches on d.moved to
+		// distinguish drag-finalize from plain-click, and the
+		// autoScrollTickMsg chain reads d.LastPos() to extend selection
+		// while held against an edge.
+		//
+		// Extend ALSO clamps the (px, py) to the originating pane when
+		// the cursor leaves it, pinning the latched pending position at
+		// the last in-pane coordinates -- the same behavior we had pre-
+		// coalescing.
 		px, py = d.Extend(panel, px, py)
-		switch d.Panel() {
-		case PanelMessages:
-			a.messagepane.ExtendSelectionAt(py, px)
-		case PanelThread:
-			a.threadPanel.ExtendSelectionAt(py, px)
-		}
-		// If the cursor is at the top/bottom edge of the originating
-		// pane, schedule an auto-scroll tick. ClaimAutoScroll returns
-		// true once until ClearAutoScroll resets it, guarding against
-		// parallel tick chains accumulating.
+		// Latch the latest position for the coalescing flush tick.
+		// Subsequent motion events in the same window overwrite this
+		// without scheduling additional ticks.
+		d.pendingX, d.pendingY = px, py
+		d.hasPending = true
+
+		// Edge auto-scroll detection stays inline (NOT coalesced):
+		// the autoscroll chain is already throttled to one in-flight
+		// tick via ClaimAutoScroll + has its own 50ms cadence, and
+		// keeping it inline preserves edge-drag responsiveness even
+		// when the user is moving slowly (one motion event per cell).
 		var hint int
 		switch d.Panel() {
 		case PanelMessages:
@@ -192,8 +236,43 @@ func (d *dragState) Handle(a *App, msg tea.Msg) (tea.Cmd, bool) {
 		case PanelThread:
 			hint = a.threadPanel.ScrollHintForDrag(py)
 		}
+		var cmds []tea.Cmd
 		if hint != 0 && d.ClaimAutoScroll() {
-			return autoScrollTickCmd(), true
+			cmds = append(cmds, autoScrollTickCmd())
+		}
+		if !d.flushScheduled {
+			d.flushScheduled = true
+			cmds = append(cmds, motionFlushTickCmd())
+		}
+		switch len(cmds) {
+		case 0:
+			return nil, true
+		case 1:
+			return cmds[0], true
+		default:
+			return tea.Batch(cmds...), true
+		}
+
+	case motionFlushTickMsg:
+		_ = m
+		// Tick consumed -- allow a future MouseMotionMsg to schedule
+		// the next one. Drop pending if the drag ended (e.g. the
+		// MouseReleaseMsg arm already drained it and reset state).
+		d.flushScheduled = false
+		if !d.IsActive() {
+			d.hasPending = false
+			return nil, true
+		}
+		if !d.hasPending {
+			return nil, true
+		}
+		d.hasPending = false
+		px, py := d.pendingX, d.pendingY
+		switch d.Panel() {
+		case PanelMessages:
+			a.messagepane.ExtendSelectionAt(py, px)
+		case PanelThread:
+			a.threadPanel.ExtendSelectionAt(py, px)
 		}
 		return nil, true
 
@@ -242,6 +321,20 @@ func (d *dragState) Handle(a *App, msg tea.Msg) (tea.Cmd, bool) {
 		_ = m
 		if !d.IsActive() {
 			return nil, true
+		}
+		// Drain any pending coalesced motion BEFORE finalizing so
+		// the panel's selRange.End (and therefore the clipboard
+		// text we're about to emit) reflects the most recent
+		// cursor position even if motionFlushTickMsg has not fired
+		// since the last MouseMotionMsg.
+		if d.hasPending {
+			switch d.Panel() {
+			case PanelMessages:
+				a.messagepane.ExtendSelectionAt(d.pendingY, d.pendingX)
+			case PanelThread:
+				a.threadPanel.ExtendSelectionAt(d.pendingY, d.pendingX)
+			}
+			d.hasPending = false
 		}
 		moved, panel, clickedMessage := d.Finish()
 		if !moved {

@@ -183,11 +183,17 @@ func (a *App) renderChannelMessagesPanel(msgWidth, msgBorder, contentHeight int,
 		msgContentHeight = 3
 	}
 
-	// Cached top region: messages + top edge + side edges.
+	// Cached top region: messages + top edge + side edges. The cache
+	// stores the SELECTION-FREE bordered output (see ViewBare +
+	// ApplySelectionToBordered below): selection mutations no longer
+	// bump messagepane.Version, so a mouse-drag's per-cell extends do
+	// not invalidate this cache. The selection is overlaid as a cheap
+	// post-pass against the cached output.
 	topPanelVersion := a.messagepane.Version()
 	topLayoutKey := msgLayoutKey | int64(composeHeight)<<16
 	topHeight := msgContentHeight + 1 // +1 for top border edge
 	topBordered := a.renderMessagesTop(msgWidth, msgBorder, topHeight, msgContentHeight, topPanelVersion, topLayoutKey, msgFocused)
+	topBordered = a.messagepane.ApplySelectionToBordered(topBordered, 1, 1)
 
 	// Fresh bottom region: typing line + compose, with bottom
 	// edge. Same lipgloss/v2 quirk applies.
@@ -223,7 +229,10 @@ func (a *App) renderMessagesTop(msgWidth, msgBorder, topHeight, msgContentHeight
 		topBorderStyle = styles.FocusedBorder.Width(msgWidth).
 			BorderTop(true).BorderLeft(true).BorderRight(true).BorderBottom(false)
 	}
-	msgView := a.messagepane.View(msgContentHeight, msgWidth-2)
+	// ViewBare (not View) so the cached output is selection-free; the
+	// caller composes ApplySelectionToBordered on top of the cache return,
+	// keeping the bordered re-render off the mouse-drag hot path.
+	msgView := a.messagepane.ViewBare(msgContentHeight, msgWidth-2)
 	msgView = messages.ReapplyBgAfterResets(msgView, messages.BgANSI())
 	out := exactSize(
 		topBorderStyle.Render(msgView),
