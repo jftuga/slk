@@ -1,13 +1,16 @@
 package thread
 
 import (
+	"context"
 	"fmt"
 	stdimage "image"
+	"io"
 	"strings"
 	"testing"
 
 	"github.com/charmbracelet/x/ansi"
 	"github.com/gammons/slk/internal/config"
+	emojiutil "github.com/gammons/slk/internal/emoji"
 	imgpkg "github.com/gammons/slk/internal/image"
 	"github.com/gammons/slk/internal/ui/imgrender"
 	"github.com/gammons/slk/internal/ui/messages"
@@ -737,3 +740,113 @@ func TestThreadView_HasScrollbarWhenOverflowing(t *testing.T) {
 		t.Fatalf("expected scrollbar glyph in overflowing thread view; got:\n%s", view)
 	}
 }
+
+// TestThreadModel_SetEmojiContext_InvalidatesCache asserts that
+// SetEmojiContext on the thread Model bumps the cache version so any
+// View()-output consumer (App's panel-output cache) re-renders with
+// the new emoji-image context. Mirrors the messages-pane behavior
+// added in Phase 6.
+func TestThreadModel_SetEmojiContext_InvalidatesCache(t *testing.T) {
+	m := New()
+	parent := messages.MessageItem{TS: "1.0", UserName: "alice", Text: "hi"}
+	m.SetThread(parent, []messages.MessageItem{
+		{TS: "1.1", UserName: "alice", UserID: "U1", Text: "hi"},
+	}, "C1", "1.0")
+	_ = m.View(80, 24)
+
+	startVersion := m.Version()
+	m.SetEmojiContext(EmojiContext{
+		PlaceCtx: emojiutil.PlaceContext{},
+		Cells:    2,
+		Customs:  nil,
+	})
+	if m.Version() == startVersion {
+		t.Errorf("SetEmojiContext did not bump thread cache version")
+	}
+}
+
+// TestThreadModel_HandleEmojiImageReady_BumpsVersion asserts that an
+// emoji image landing (EmojiImageReadyMsg) invalidates the thread
+// render cache so the next View() picks up the now-warm placement.
+func TestThreadModel_HandleEmojiImageReady_BumpsVersion(t *testing.T) {
+	m := New()
+	parent := messages.MessageItem{TS: "1.0", UserName: "alice", Text: "hi"}
+	m.SetThread(parent, []messages.MessageItem{
+		{TS: "1.1", UserName: "alice", UserID: "U1", Text: "hi"},
+	}, "C1", "1.0")
+	_ = m.View(80, 24)
+
+	v0 := m.Version()
+	m.HandleEmojiImageReady("https://example.com/x.png")
+	if m.Version() == v0 {
+		t.Errorf("HandleEmojiImageReady did not bump thread cache version")
+	}
+}
+
+// TestThreadModel_RenderReplyWithImageEmoji_WarmCache wires a fake
+// emoji prerender cache and asserts that a thread reply's body text
+// containing :thumbsup: renders the kitty placeholder rune sequence
+// (warm path), not the literal shortcode text. Mirrors the
+// integration test in the messages pane (Phase 6 Task 6.10).
+func TestThreadModel_RenderReplyWithImageEmoji_WarmCache(t *testing.T) {
+	emojiutil.SetImageMode(true, 2)
+	t.Cleanup(func() { emojiutil.SetImageMode(false, 2) })
+
+	thumbURL := emojiutil.CDNBaseURL + "1f44d.png"
+
+	ff := newFakePlaceFetcher()
+	ff.setPrerendered(emojiutil.EmojiCacheKey(thumbURL), stdimage.Pt(2, 1), imgpkg.Render{
+		Cells: stdimage.Pt(2, 1),
+		Lines: []string{"\U0010EEEE\U0010EEEE"},
+	})
+
+	m := New()
+	m.SetEmojiContext(EmojiContext{
+		PlaceCtx: emojiutil.PlaceContext{Fetcher: ff},
+		Cells:    2,
+		Customs:  nil,
+	})
+	parent := messages.MessageItem{TS: "1.0", UserName: "alice", Text: "p"}
+	m.SetThread(parent, []messages.MessageItem{
+		{TS: "1.1", UserName: "alice", UserID: "U1", Text: "reply :thumbsup:",
+			Reactions: []messages.ReactionItem{{Emoji: "thumbsup", Count: 1}},
+		},
+	}, "C1", "1.0")
+
+	out := m.View(80, 24)
+	if !strings.Contains(out, "\U0010EEEE") {
+		t.Errorf("thread view does not contain kitty placeholder runes; image mode appears inactive\noutput=%q", out)
+	}
+	if strings.Contains(out, ":thumbsup:") {
+		t.Errorf("thread view contains literal :thumbsup: text; image mode did not replace it\noutput=%q", out)
+	}
+}
+
+// fakePlaceFetcher is a test fake for emojiutil.PlaceFetcher. v1
+// duplicates the one in internal/ui/messages/render_test.go (rather
+// than factoring into a shared testutil) — see polish list for the
+// follow-up factor-out item.
+type fakePlaceFetcher struct {
+	prerender map[string]imgpkg.Render
+}
+
+func newFakePlaceFetcher() *fakePlaceFetcher {
+	return &fakePlaceFetcher{prerender: map[string]imgpkg.Render{}}
+}
+
+func (f *fakePlaceFetcher) setPrerendered(key string, t stdimage.Point, r imgpkg.Render) {
+	f.prerender[fmt.Sprintf("%s|%dx%d", key, t.X, t.Y)] = r
+}
+
+func (f *fakePlaceFetcher) Prerendered(key string, t stdimage.Point, proto imgpkg.Protocol) (imgpkg.Render, bool) {
+	r, ok := f.prerender[fmt.Sprintf("%s|%dx%d", key, t.X, t.Y)]
+	return r, ok
+}
+
+func (f *fakePlaceFetcher) Fetch(ctx context.Context, req imgpkg.FetchRequest) (imgpkg.FetchResult, error) {
+	return imgpkg.FetchResult{}, nil
+}
+
+// Compile-time guard that `io` (used by the fake's Render flush type)
+// is referenced; renderer flushes are `func(io.Writer) error`.
+var _ = io.Discard

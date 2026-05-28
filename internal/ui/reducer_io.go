@@ -67,6 +67,16 @@ func copiedClearAfter(d time.Duration) tea.Cmd {
 	})
 }
 
+// emojiInvalidateDebounce is the coalesce window for EmojiImageReadyMsg
+// arrivals. Chosen to absorb the typical burst of fetch completions on
+// a busy channel's first render (50+ unique emoji finishing within tens
+// of milliseconds of each other) into a single cache rebuild. Tuned for
+// "imperceptibly delayed" rather than "instantaneous": a 100ms wait
+// before image emoji appear is well within the budget where a user
+// would not notice, while the savings from coalescing N rebuilds into
+// 1 are dramatic.
+const emojiInvalidateDebounce = 100 * time.Millisecond
+
 // toastWithClear pushes text into the status bar's toast slot and
 // schedules the clear after `d`. Used by the fixed-text and
 // formatted-reason toasts below.
@@ -170,6 +180,40 @@ var reduceIO reducerFunc = func(a *App, msg tea.Msg) (tea.Cmd, bool) {
 		if a.threadPanel.HasReply(m.TS) {
 			a.threadPanel.InvalidateCache()
 		}
+		return nil, true
+
+	case EmojiImageReadyMsg:
+		debuglog.ImgFetch("recv: kind=emoji-ready url=%s pending=%v", m.URL, a.emojiInvalidatePending)
+		// An emoji-image fetch landed. Naively each arrival would
+		// trigger a full cache rebuild across every emoji-rendering
+		// surface (messages, thread, picker). On a busy channel with
+		// many cold-cache emoji this cascades into seconds of UI-
+		// thread saturation — looks like a freeze. Debounce: schedule
+		// one tick on the first arrival; absorb every subsequent
+		// arrival into the pending batch and let them collapse to a
+		// single invalidation when the tick fires.
+		if a.emojiInvalidatePending {
+			return nil, true
+		}
+		a.emojiInvalidatePending = true
+		return tea.Tick(emojiInvalidateDebounce, func(time.Time) tea.Msg {
+			return emojiInvalidateMsg{}
+		}), true
+
+	case emojiInvalidateMsg:
+		_ = m
+		// Debounce window closed. One wholesale invalidation across
+		// every emoji-rendering surface; arrivals accumulated during
+		// the window collapse to this. The URL argument is unused —
+		// the surface handlers wipe their caches wholesale regardless
+		// of URL in v1.
+		a.emojiInvalidatePending = false
+		a.messagepane.HandleEmojiImageReady("")
+		a.threadPanel.HandleEmojiImageReady("")
+		a.reactionPicker.HandleEmojiImageReady("") // no-op in v1; future caching may use it
+		// Autocomplete dropdowns have no cache; the no-op hooks on
+		// a.compose.emojiPicker / a.threadCompose.emojiPicker keep
+		// the surface symmetric. Listed here for the audit trail.
 		return nil, true
 
 	case messages.AvatarReadyMsg:

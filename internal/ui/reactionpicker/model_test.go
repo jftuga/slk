@@ -1,7 +1,14 @@
 package reactionpicker
 
 import (
+	"context"
+	"fmt"
+	goimage "image"
+	"strings"
 	"testing"
+
+	slkemoji "github.com/gammons/slk/internal/emoji"
+	imgpkg "github.com/gammons/slk/internal/image"
 )
 
 func TestNewModel(t *testing.T) {
@@ -215,4 +222,59 @@ func stringContains(s, sub string) bool {
 		}
 	}
 	return false
+}
+
+// fakePickerFetcher is a test fake for emojiutil.PlaceFetcher. v1
+// duplicates the equivalent fakes in messages/render_test.go and
+// thread/model_test.go (rather than factoring into a shared testutil)
+// — see polish list for the follow-up factor-out item.
+type fakePickerFetcher struct {
+	prerender map[string]imgpkg.Render
+}
+
+func newFakePickerFetcher() *fakePickerFetcher {
+	return &fakePickerFetcher{prerender: map[string]imgpkg.Render{}}
+}
+
+func (f *fakePickerFetcher) setPrerendered(key string, t goimage.Point, r imgpkg.Render) {
+	f.prerender[fmt.Sprintf("%s|%dx%d", key, t.X, t.Y)] = r
+}
+
+func (f *fakePickerFetcher) Prerendered(key string, t goimage.Point, _ imgpkg.Protocol) (imgpkg.Render, bool) {
+	r, ok := f.prerender[fmt.Sprintf("%s|%dx%d", key, t.X, t.Y)]
+	return r, ok
+}
+
+func (f *fakePickerFetcher) Fetch(_ context.Context, _ imgpkg.FetchRequest) (imgpkg.FetchResult, error) {
+	return imgpkg.FetchResult{}, nil
+}
+
+func TestPicker_View_ImageMode_UsesPlacement(t *testing.T) {
+	slkemoji.SetImageMode(true, 2)
+	t.Cleanup(func() { slkemoji.SetImageMode(false, 2) })
+
+	thumbURL := slkemoji.CDNBaseURL + "1f44d.png"
+	ff := newFakePickerFetcher()
+	ff.setPrerendered(slkemoji.EmojiCacheKey(thumbURL), goimage.Pt(2, 1), imgpkg.Render{
+		Cells: goimage.Pt(2, 1),
+		Lines: []string{"\U0010EEEE\U0010EEEE"},
+	})
+
+	m := New()
+	m.Open("C123", "1234.5678", nil)
+	m.SetEmojiContext(EmojiContext{
+		PlaceCtx: slkemoji.PlaceContext{Fetcher: ff},
+		Cells:    2,
+		Customs:  nil,
+	})
+
+	// Filter to a small set so the assert is unambiguous.
+	for _, ch := range "thumbsup" {
+		m.HandleKey(string(ch))
+	}
+
+	out := m.View(80)
+	if !strings.Contains(out, "\U0010EEEE") {
+		t.Errorf("picker View does not contain kitty placeholder runes\noutput=%q", out)
+	}
 }

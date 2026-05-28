@@ -1,28 +1,23 @@
 // Package emoji provides utilities for measuring emoji display width
-// based on probed terminal behavior, with caching across sessions.
+// when emoji are rendered as inline images via the kitty graphics
+// protocol. When image mode is inactive, Width() falls back to
+// lipgloss.Width().
 package emoji
 
 import (
-	"sync"
-
 	"charm.land/lipgloss/v2"
 	"github.com/charmbracelet/x/ansi"
 	"github.com/rivo/uniseg"
 )
 
-var (
-	widthMu  sync.RWMutex
-	widthMap map[string]int // emoji grapheme cluster → width
-)
-
 // Width returns the rendered cell width of s.
 //
 // ANSI escape sequences are stripped before measurement (matching
-// lipgloss.Width's behavior). For grapheme clusters present in the
-// probed cache, returns the cached width. For pure ASCII or content
-// with no emoji, delegates directly to lipgloss.Width(). For mixed
-// content, segments by grapheme cluster and sums per-cluster widths
-// (cache hit or lipgloss fallback per cluster).
+// lipgloss.Width's behavior). For pure ASCII or when image mode is
+// inactive, delegates to lipgloss.Width(). When image mode is active,
+// each grapheme cluster recognized as an emoji image contributes the
+// configured cell footprint (typically 2) and all other clusters fall
+// through to lipgloss.
 func Width(s string) int {
 	// Strip ANSI escape sequences first. Without this, uniseg would
 	// segment ESC bytes and parameter bytes as individual graphemes,
@@ -33,55 +28,22 @@ func Width(s string) int {
 	if !containsNonASCII(stripped) {
 		return lipgloss.Width(stripped)
 	}
-
-	widthMu.RLock()
-	cached := widthMap
-	widthMu.RUnlock()
-
-	if len(cached) == 0 {
+	if !ImageModeActive() {
 		return lipgloss.Width(stripped)
 	}
 
-	// Segment by grapheme cluster, look up each.
+	imageCells := ImageModeCells()
 	total := 0
 	gr := uniseg.NewGraphemes(stripped)
 	for gr.Next() {
 		cluster := gr.Str()
-		if w, ok := cached[cluster]; ok {
-			total += w
-		} else {
-			total += lipgloss.Width(cluster)
+		if isKnownEmojiCluster(cluster) {
+			total += imageCells
+			continue
 		}
+		total += lipgloss.Width(cluster)
 	}
 	return total
-}
-
-// IsCalibrated reports whether the probe succeeded and we have a
-// terminal-specific width map loaded.
-func IsCalibrated() bool {
-	widthMu.RLock()
-	defer widthMu.RUnlock()
-	return len(widthMap) > 0
-}
-
-// setWidthMap installs a new width map. Used by Init() and tests.
-//
-// IMPORTANT: The caller must not mutate m after passing it here. Width()
-// uses a snapshot pattern (acquire RLock, copy map header, release lock,
-// then dereference) which is only safe when installed maps are treated
-// as immutable. Replace the map by calling setWidthMap again with a new
-// instance rather than mutating the existing map.
-func setWidthMap(m map[string]int) {
-	widthMu.Lock()
-	defer widthMu.Unlock()
-	widthMap = m
-}
-
-// resetWidthMap clears the width map. Used by tests.
-func resetWidthMap() {
-	widthMu.Lock()
-	defer widthMu.Unlock()
-	widthMap = nil
 }
 
 // containsNonASCII returns true if s has any byte ≥ 0x80.

@@ -27,6 +27,7 @@ import (
 	"github.com/gammons/slk/internal/ui/channelpicker"
 	"github.com/gammons/slk/internal/ui/compose"
 	"github.com/gammons/slk/internal/ui/confirmprompt"
+	"github.com/gammons/slk/internal/ui/emojipicker"
 	"github.com/gammons/slk/internal/ui/help"
 	"github.com/gammons/slk/internal/ui/imgrender"
 	"github.com/gammons/slk/internal/ui/mentionpicker"
@@ -183,6 +184,14 @@ type App struct {
 	// callers (activation, list reload, G jump) do NOT bump this — bumping there
 	// would needlessly invalidate any in-flight debounced fetch about to land.
 	pendingThreadFetchGen uint64
+
+	// emojiInvalidatePending guards against scheduling multiple tick
+	// callbacks when many EmojiImageReadyMsg arrive in rapid succession
+	// (e.g., a fresh channel with 50+ cold-cache emoji whose fetches all
+	// complete in a burst). Coalesces every arrival within the debounce
+	// window into a single cache invalidation when the emojiInvalidateMsg
+	// tick fires. See reducer_io.go's EmojiImageReadyMsg arm.
+	emojiInvalidatePending bool
 
 	// Reaction picker
 	reactionPicker *reactionpicker.Model
@@ -1405,6 +1414,37 @@ func (a *App) SetImageContext(ctx imgrender.ImageContext) {
 	a.threadPanel.SetImageContext(ctx)
 }
 
+// SetEmojiContext forwards the emoji rendering context to both the
+// messages pane and the thread pane. They each hold their own copy
+// because they have independent render caches and call paths.
+// Subsequent CustomEmojisLoadedMsg dispatches update the customs map
+// via App.SetCustomEmoji which calls back into both panes' emojiCtx.
+//
+// Phase 8 extends this to the picker; Phase 9 to autocomplete.
+func (a *App) SetEmojiContext(ctx messages.EmojiContext) {
+	a.messagepane.SetEmojiContext(ctx)
+	a.threadPanel.SetEmojiContext(thread.EmojiContext{
+		PlaceCtx: ctx.PlaceCtx,
+		Cells:    ctx.Cells,
+		Customs:  ctx.Customs,
+	})
+	a.reactionPicker.SetEmojiContext(reactionpicker.EmojiContext{
+		PlaceCtx: ctx.PlaceCtx,
+		Cells:    ctx.Cells,
+		Customs:  ctx.Customs,
+	})
+	a.compose.SetEmojiContext(emojipicker.EmojiContext{
+		PlaceCtx: ctx.PlaceCtx,
+		Cells:    ctx.Cells,
+		Customs:  ctx.Customs,
+	})
+	a.threadCompose.SetEmojiContext(emojipicker.EmojiContext{
+		PlaceCtx: ctx.PlaceCtx,
+		Cells:    ctx.Cells,
+		Customs:  ctx.Customs,
+	})
+}
+
 // SetImageFetcher records the image fetcher so the preview overlay can
 // fetch large thumbs on demand. Called once at startup from main.go.
 func (a *App) SetImageFetcher(f *imgpkg.Fetcher) {
@@ -1702,7 +1742,9 @@ func (a *App) SetChannelMembership(channelID string, memberIDs []string) {
 }
 
 // SetCustomEmoji rebuilds the emoji entry list (built-ins + the active
-// workspace's customs) and pushes it into both compose boxes.
+// workspace's customs) and pushes it into both compose boxes. Also
+// updates the messages pane's emoji-image context so newly-known
+// custom emoji URLs become resolvable on the next render.
 func (a *App) SetCustomEmoji(customs map[string]string) {
 	entries := emoji.BuildEntries(customs)
 	a.compose.SetEmojiEntries(entries)
@@ -1710,6 +1752,17 @@ func (a *App) SetCustomEmoji(customs map[string]string) {
 	if a.reactionPicker != nil {
 		a.reactionPicker.SetCustomEmoji(customs)
 	}
+	// Update all panes' emoji-image context so newly-known custom
+	// emoji URLs become resolvable on the next render.
+	a.messagepane.SetEmojiCustoms(customs)
+	a.threadPanel.SetEmojiCustoms(customs)
+	a.reactionPicker.SetEmojiCustoms(customs)
+	// Compose autocomplete dropdowns (main + thread) also need the
+	// customs map for View()-time URL resolution; without this, custom
+	// emoji rows fall back to the placeholder glyph. See
+	// emojipicker.Model.SetEmojiCustoms for context.
+	a.compose.SetEmojiCustoms(customs)
+	a.threadCompose.SetEmojiCustoms(customs)
 }
 
 // SetInitialChannel sets the active channel and its messages before the TUI starts.

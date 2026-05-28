@@ -391,43 +391,40 @@ func main() {
 		}
 	}
 
-	// Emoji width probing: parse flags and call Init before bubbletea starts.
-	skipProbe := false
-	forceProbe := false
-	for _, arg := range os.Args[1:] {
-		switch arg {
-		case "--no-emoji-probe":
-			skipProbe = true
-		case "--probe-emoji":
-			forceProbe = true
+	// Load config early (best-effort) so we can pre-detect the image
+	// rendering protocol and decide whether to skip the emoji width
+	// probe. run() loads config independently as the source of truth;
+	// this duplicate load mirrors the best-effort pattern used at the
+	// bottom of this file (search for "best-effort" near config.Load).
+	// Plan-deviation note: the original plan assumed cfg was available
+	// pre-probe, but config.Load actually lives in run() (line 467).
+	// Loading here adds ~1ms and lets the probe-skip decision happen
+	// before the ~30s probe runs.
+	preCfgPath := filepath.Join(xdgConfig(), "config.toml")
+	preCfg, preCfgErr := config.Load(preCfgPath)
+	if preCfgErr != nil {
+		debuglog.ImgRender("pre-probe config load failed: %v (continuing without image-mode pre-detect)", preCfgErr)
+	}
+
+	// Pre-detect the image rendering protocol (env-based; non-interactive)
+	// so we can decide whether to skip the emoji width probe entirely.
+	// Image mode is active when the user has requested it AND we have
+	// reasonable confidence kitty will be the final protocol. The
+	// interactive kitty version probe in run() may still downgrade
+	// kitty→halfblock; in that rare case the user has already paid the
+	// probe-skip and will see lipgloss-fallback widths for non-trivial
+	// clusters. Acceptable tradeoff for the common-case startup win.
+	if preCfgErr == nil {
+		preDetectedProto := imgpkg.Detect(imgpkg.CaptureEnv(), preCfg.Appearance.ImageProtocol)
+		imageMode := preCfg.Appearance.EmojiImages == "on" && preDetectedProto == imgpkg.ProtoKitty
+		emojiwidth.SetImageMode(imageMode, preCfg.Appearance.EmojiCells)
+		if imageMode {
+			debuglog.ImgRender("emoji image mode: ON (pre-detected proto=%s, emoji_images=%q)",
+				preDetectedProto, preCfg.Appearance.EmojiImages)
+		} else {
+			debuglog.ImgRender("emoji image mode: OFF (pre-detected proto=%s, emoji_images=%q)",
+				preDetectedProto, preCfg.Appearance.EmojiImages)
 		}
-	}
-
-	probedNow := false
-	probeStart := time.Now()
-	probeOpts := emojiwidth.InitOptions{
-		SkipProbe:  skipProbe,
-		ForceProbe: forceProbe,
-	}
-	if emojiwidth.WillProbe(probeOpts) {
-		fmt.Fprintln(os.Stderr, "Calibrating emoji widths for your terminal (one-time, ~30 seconds)...")
-		probedNow = true
-	}
-
-	if err := emojiwidth.Init(probeOpts); err != nil {
-		fmt.Fprintf(os.Stderr, "Warning: emoji width calibration failed: %v\n", err)
-		fmt.Fprintln(os.Stderr, "Falling back to library defaults; some emoji may render with incorrect width.")
-	}
-
-	if probedNow && emojiwidth.IsCalibrated() {
-		cachePath := emojiwidth.CachePath(emojiwidth.IdentifyTerminal())
-		fmt.Fprintf(os.Stderr, "Done in %dms. Cached to %s\n", time.Since(probeStart).Milliseconds(), cachePath)
-	}
-
-	if forceProbe {
-		// --probe-emoji is a diagnostic flag: probe and exit.
-		fmt.Fprintln(os.Stderr, "Probe complete. Exiting.")
-		os.Exit(0)
 	}
 
 	if err := run(); err != nil {
@@ -650,9 +647,34 @@ func run() error {
 			SendMsg:     send,
 		}
 	}
+	// buildPlaceCtx mirrors buildImgCtx for emoji-image placements.
+	// The Fetcher is the same instance (one cache, one prerender
+	// pipeline). SendMsg dispatches EmojiImageReadyMsg through
+	// bubbletea so reducers can invalidate per-surface caches.
+	buildPlaceCtx := func(send func(tea.Msg)) emojiwidth.PlaceContext {
+		return emojiwidth.PlaceContext{
+			Fetcher: imageFetcher,
+			SendMsg: func(v any) {
+				if send != nil {
+					if msg, ok := v.(tea.Msg); ok {
+						send(msg)
+					}
+				}
+			},
+		}
+	}
 	app.SetImageContext(buildImgCtx(nil))
 	app.SetImageFetcher(imageFetcher)
 	app.SetImageProtocol(proto)
+
+	// Emoji-image rendering. Active only on kitty (per ImageMode
+	// gate set earlier in startup). When inactive the messages pane
+	// uses the legacy glyph/shortcode-text rendering path.
+	app.SetEmojiContext(messages.EmojiContext{
+		PlaceCtx: buildPlaceCtx(nil), // SendMsg refreshed below once Program exists
+		Cells:    cfg.Appearance.EmojiCells,
+		Customs:  nil, // populated by CustomEmojisLoadedMsg
+	})
 
 	// Apply user-configured workspace ordering to tokens before
 	// building the rail. The rail and digit-key (1-9) mapping both
@@ -1386,6 +1408,14 @@ func run() error {
 	// rendering kicks off prefetches whose completions would otherwise
 	// be dropped on the floor.
 	app.SetImageContext(buildImgCtx(p.Send))
+	// Refresh the emoji PlaceContext with the real SendMsg so cold-
+	// path emoji fetches dispatch EmojiImageReadyMsg into the loop
+	// and surfaces re-render with the now-warm placement.
+	app.SetEmojiContext(messages.EmojiContext{
+		PlaceCtx: buildPlaceCtx(p.Send),
+		Cells:    cfg.Appearance.EmojiCells,
+		Customs:  nil, // CustomEmojisLoadedMsg fills this in
+	})
 
 	// Wire avatar-ready callback so the lazy AvatarFunc path's
 	// background fetches invalidate the messages/thread caches and

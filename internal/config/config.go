@@ -56,6 +56,16 @@ type Appearance struct {
 	// mouse-wheel notch. Higher = faster scroll. Defaults to 3 (typical
 	// terminal behavior). Clamped to >= 1 at load time.
 	MouseWheelLines int `toml:"mouse_wheel_lines"`
+	// EmojiImages controls whether emoji are rendered as PNG images
+	// (from Slack's CDN) via the kitty graphics protocol. One of:
+	// "on" (default) or "off". On non-kitty terminals this is silently
+	// treated as "off"; see internal/emoji/place.go.
+	EmojiImages string `toml:"emoji_images"`
+	// EmojiCells is the terminal-cell footprint reserved for each
+	// emoji image (cells wide x 1 row tall). 2 (default) matches the
+	// East-Asian-Wide convention; 1 is an escape hatch if 2 looks too
+	// large in a given font. Clamped to {1, 2} at load time.
+	EmojiCells int `toml:"emoji_cells"`
 }
 
 type Animations struct {
@@ -133,6 +143,8 @@ func Default() Config {
 			MaxImageRows:    20,
 			MaxImageCols:    60,
 			MouseWheelLines: 3,
+			EmojiImages:     "on",
+			EmojiCells:      2,
 		},
 		Animations: Animations{
 			Enabled:          true,
@@ -183,6 +195,18 @@ func Load(path string) (Config, error) {
 	// back to the default. >= 1 to guarantee scroll progress per notch.
 	if cfg.Appearance.MouseWheelLines < 1 {
 		cfg.Appearance.MouseWheelLines = 3
+	}
+
+	// Clamp EmojiCells to the documented set {1, 2}. 0 (unset after a
+	// partial [appearance] block) and any other value fall back to 2.
+	if cfg.Appearance.EmojiCells != 1 && cfg.Appearance.EmojiCells != 2 {
+		cfg.Appearance.EmojiCells = 2
+	}
+
+	// Clamp EmojiImages to the documented set {"on", "off"}. Empty
+	// (unset) and any unrecognized value fall back to "on".
+	if cfg.Appearance.EmojiImages != "on" && cfg.Appearance.EmojiImages != "off" {
+		cfg.Appearance.EmojiImages = "on"
 	}
 
 	return cfg, nil

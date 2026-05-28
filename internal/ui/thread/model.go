@@ -190,6 +190,21 @@ type Model struct {
 	// renders placeholder-only) but does not support click-to-preview
 	// from a thread reply.
 	imgRenderer *imgrender.Renderer
+
+	// emojiCtx bundles the emoji-image rendering dependencies. Threaded
+	// through RenderSlackMarkdownWith for reply body text and consulted
+	// directly when building reply reaction pills. Configured at startup
+	// via Model.SetEmojiContext (mirrors messages.Model).
+	emojiCtx EmojiContext
+}
+
+// EmojiContext bundles the emoji-image rendering dependencies for the
+// thread pane. Mirrors messages.EmojiContext in shape and purpose —
+// see internal/ui/messages/model.go for the architectural rationale.
+type EmojiContext struct {
+	PlaceCtx emojiutil.PlaceContext
+	Cells    int               // 1 or 2; 0 falls back to 2
+	Customs  map[string]string // workspace custom emoji map; nil = empty
 }
 
 // New creates an empty thread panel.
@@ -207,6 +222,37 @@ func (m *Model) SetImageContext(ctx imgrender.ImageContext) {
 		m.imgRenderer = imgrender.NewRenderer()
 	}
 	m.imgRenderer.SetContext(ctx)
+	m.InvalidateCache()
+}
+
+// SetEmojiContext configures emoji-image rendering for thread replies.
+// Should be called once at startup (cmd/slk/main.go) and again after
+// CustomEmojisLoadedMsg arrives (via SetEmojiCustoms). Mirrors
+// messages.Model.SetEmojiContext.
+func (m *Model) SetEmojiContext(ctx EmojiContext) {
+	if ctx.Cells != 1 && ctx.Cells != 2 {
+		ctx.Cells = 2
+	}
+	m.emojiCtx = ctx
+	m.InvalidateCache()
+}
+
+// SetEmojiCustoms updates only the customs map on the active emoji
+// context, leaving PlaceCtx and Cells untouched. Invalidates the cache
+// so the new map is consulted on the next View(). Mirrors
+// messages.Model.SetEmojiCustoms.
+func (m *Model) SetEmojiCustoms(customs map[string]string) {
+	m.emojiCtx.Customs = customs
+	m.InvalidateCache()
+}
+
+// HandleEmojiImageReady is invoked by the host (App.Update) when an
+// emoji.EmojiImageReadyMsg lands. The same emoji can appear anywhere
+// in the open thread (body text or reaction pills), so v1 performs a
+// wholesale render-cache invalidation; the next View() rebuilds with
+// the now-warm emoji placement. Mirrors messages.Model.HandleEmojiImageReady.
+func (m *Model) HandleEmojiImageReady(url string) {
+	debuglog.ImgFetch("thread.HandleEmojiImageReady: url=%s wholesale_invalidate", url)
 	m.InvalidateCache()
 }
 
@@ -1652,7 +1698,20 @@ func (m *Model) renderThreadMessage(msg messages.MessageItem, width int, userNam
 		contentWidth = 20
 	}
 
-	text := styles.MessageText.Render(messages.WordWrap(messages.RenderSlackMarkdown(messages.MessageTextSource(msg), userNames, channelNames), contentWidth))
+	// flushes aggregates per-frame side effects (kitty image upload
+	// escapes) from body-text emoji, reaction-pill emoji, and inline
+	// image attachments. Walked by the View() loop for visible entries.
+	// Mirrors the messages-pane named-return `flushes` slice.
+	var flushes []func(io.Writer) error
+	bodyOpts := messages.RenderSlackMarkdownOpts{
+		UserNames:    userNames,
+		ChannelNames: channelNames,
+		PlaceCtx:     m.emojiCtx.PlaceCtx,
+		EmojiCells:   m.emojiCtx.Cells,
+		Customs:      m.emojiCtx.Customs,
+		EmojiFlushes: &flushes,
+	}
+	text := styles.MessageText.Render(messages.WordWrap(messages.RenderSlackMarkdownWith(messages.MessageTextSource(msg), bodyOpts), contentWidth))
 
 	var reactionLine string
 	// pillSpecs captures one entry per real (non-"+") reaction pill in
@@ -1670,27 +1729,49 @@ func (m *Model) renderThreadMessage(msg messages.MessageItem, width int, userNam
 	if len(msg.Reactions) > 0 {
 		var pills []string
 		var pillEmojis []string
+		// Image-aware emoji-as-image path is active only when the
+		// process-global ImageMode is on AND a fetcher has been
+		// installed via SetEmojiContext. Otherwise the legacy
+		// glyph/shortcode-text branch renders. Mirrors the
+		// messages-pane reaction-pill loop.
+		imageOK := emojiutil.ImageModeActive() && m.emojiCtx.PlaceCtx.Fetcher != nil
+		pillCells := m.emojiCtx.Cells
+		if pillCells <= 0 {
+			pillCells = 2
+		}
 		for i, r := range msg.Reactions {
-			// Drop any skin-tone modifier suffix so the pill renders the
-			// base emoji at a well-known width. Skin-toned glyphs render
-			// inconsistently across terminals and tend to break border
-			// alignment regardless of how we measure them.
+			// Image path: pass r.Emoji directly (including any skin-tone
+			// suffix) — URLForShortcode composes the per-tone CDN URL
+			// natively. Stripping skin tone was a workaround for
+			// glyph-rendering width inconsistencies that no longer apply
+			// at the kitty-image cell footprint. Mirror of the
+			// messages-pane reaction-pill loop.
 			//
-			// Resolve the shortcode to Unicode and check whether the
-			// resolved form is composition-safe. Multi-codepoint
-			// sequences (ZWJ flags, regional-indicator flag pairs,
-			// any residual skin-tone modifiers) render as broken
-			// glyphs in many terminal fonts and break right-border
-			// alignment; in those cases we display the readable
-			// :shortcode: text instead. Mirror of the message-pane
-			// fix; see internal/emoji/shouldrender.go.
-			nameForLookup := emojiutil.StripSkinTone(r.Emoji)
-			resolved := kyoemoji.Sprint(":" + nameForLookup + ":")
+			// Legacy path: still strip the suffix because the glyph
+			// renderer suffers the original width-inconsistency problem
+			// (multi-codepoint ZWJ / skin-tone sequences render at
+			// terminal-dependent widths and break border alignment).
 			var emojiStr string
-			if emojiutil.ShouldRenderUnicode(resolved) {
-				emojiStr = resolved
-			} else {
-				emojiStr = ":" + nameForLookup + ":"
+			var placedFlush func(io.Writer) error
+			if imageOK {
+				if url, ok := emojiutil.URLForShortcode(r.Emoji, m.emojiCtx.Customs); ok {
+					if placement, flush, ok := emojiutil.Place(m.emojiCtx.PlaceCtx, url, pillCells); ok {
+						emojiStr = placement
+						placedFlush = flush
+					}
+				}
+			}
+			if emojiStr == "" {
+				// Legacy fallback path (image mode off, no URL, or
+				// Place returned false). Strip skin tone here only —
+				// the glyph renderer still needs the workaround.
+				legacyName := emojiutil.StripSkinTone(r.Emoji)
+				resolved := kyoemoji.Sprint(":" + legacyName + ":")
+				if emojiutil.ShouldRenderUnicode(resolved) {
+					emojiStr = resolved
+				} else {
+					emojiStr = ":" + legacyName + ":"
+				}
 			}
 			pillText := fmt.Sprintf("%s%d", emojiStr, r.Count)
 			var style lipgloss.Style
@@ -1703,6 +1784,11 @@ func (m *Model) renderThreadMessage(msg messages.MessageItem, width int, userNam
 			}
 			pills = append(pills, style.Render(pillText))
 			pillEmojis = append(pillEmojis, r.Emoji)
+			// Image emoji in reaction pills land in the same per-frame
+			// flush list as body text and inline image attachments.
+			if placedFlush != nil {
+				flushes = append(flushes, placedFlush)
+			}
 		}
 		if isSelected && m.reactionNavActive {
 			plusStyle := styles.ReactionPillPlus
@@ -1758,14 +1844,13 @@ func (m *Model) renderThreadMessage(msg messages.MessageItem, width int, userNam
 	}
 
 	// Attachments: per-attachment inline render via imgrender.Renderer.
-	// v1: flushes are aggregated and returned for the cache layer to
-	// invoke during View(); the per-block Hit and SixelRows are
-	// discarded (click-to-preview from threads and inline sixel
-	// emission are out of scope for v1; sixel images render their
+	// v1: flushes are aggregated into the unified `flushes` slice for
+	// the cache layer to invoke during View(); the per-block Hit and
+	// SixelRows are discarded (click-to-preview from threads and inline
+	// sixel emission are out of scope for v1; sixel images render their
 	// res.Lines placeholder/sentinel only).
 	var attachmentLines string
 	attachmentLineCount := 0
-	var aggFlushes []func(io.Writer) error
 	if len(msg.Attachments) > 0 {
 		if m.imgRenderer == nil {
 			m.imgRenderer = imgrender.NewRenderer()
@@ -1784,7 +1869,7 @@ func (m *Model) renderThreadMessage(msg messages.MessageItem, width int, userNam
 				Thumbs: imgThumbs,
 			}, m.channelID, msg.TS, contentWidth, 0 /* baseRow */, attIdx, 0 /* contentColBase */)
 			blocks = append(blocks, strings.Join(res.Lines, "\n"))
-			aggFlushes = append(aggFlushes, res.Flushes...)
+			flushes = append(flushes, res.Flushes...)
 			attachmentLineCount += len(res.Lines)
 		}
 		attachmentLines = "\n" + strings.Join(blocks, "\n")
@@ -1814,5 +1899,5 @@ func (m *Model) renderThreadMessage(msg messages.MessageItem, width int, userNam
 		}
 	}
 
-	return line + "\n" + text + attachmentLines + reactionLine, aggFlushes, reactionHits
+	return line + "\n" + text + attachmentLines + reactionLine, flushes, reactionHits
 }

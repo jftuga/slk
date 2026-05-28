@@ -7,10 +7,12 @@ import (
 	stdimage "image"
 	imgcolor "image/color"
 	imgpng "image/png"
+	"io"
 	"strings"
 	"testing"
 
 	"github.com/gammons/slk/internal/config"
+	emojiutil "github.com/gammons/slk/internal/emoji"
 	imgpkg "github.com/gammons/slk/internal/image"
 	"github.com/gammons/slk/internal/ui/imgrender"
 	"github.com/gammons/slk/internal/ui/styles"
@@ -1132,5 +1134,144 @@ func TestHitTestReaction_NoHitsWithoutReactions(t *testing.T) {
 	}
 	if _, _, ok := m.HitTestReaction(0, 0); ok {
 		t.Error("HitTestReaction with no reactions should always return ok=false")
+	}
+}
+
+func TestModel_SetEmojiContext_InvalidatesCache(t *testing.T) {
+	msgs := []MessageItem{
+		{TS: "1.0", UserID: "U1", UserName: "alice", Text: "hello", Timestamp: "10:30 AM"},
+	}
+	m := New(msgs, "general")
+	// Force a render to populate m.cache.
+	_ = m.View(20, 60)
+	if m.cache == nil {
+		t.Fatalf("cache should be populated after View()")
+	}
+
+	m.SetEmojiContext(EmojiContext{
+		PlaceCtx: emojiutil.PlaceContext{},
+		Cells:    2,
+		Customs:  nil,
+	})
+	if m.cache != nil {
+		t.Errorf("cache should be nil after SetEmojiContext (forces re-render)")
+	}
+}
+
+func TestModel_RenderMessageWithImageEmoji_WarmCache(t *testing.T) {
+	emojiutil.SetImageMode(true, 2)
+	t.Cleanup(func() { emojiutil.SetImageMode(false, 2) })
+
+	thumbURL := emojiutil.CDNBaseURL + "1f44d.png"
+	heartURL := emojiutil.CDNBaseURL + "2764-fe0f.png"
+
+	ff := newFakePlaceFetcher() // defined in render_test.go
+	ff.setPrerendered(emojiutil.EmojiCacheKey(thumbURL), stdimage.Pt(2, 1), imgpkg.Render{
+		Cells: stdimage.Pt(2, 1),
+		Lines: []string{"\U0010EEEE\U0010EEEE"},
+	})
+	ff.setPrerendered(emojiutil.EmojiCacheKey(heartURL), stdimage.Pt(2, 1), imgpkg.Render{
+		Cells: stdimage.Pt(2, 1),
+		Lines: []string{"\U0010EEEE\U0010EEEE"},
+	})
+
+	msgs := []MessageItem{{
+		TS:        "1.0",
+		UserName:  "alice",
+		UserID:    "U1",
+		Text:      "hi :thumbsup: and \u2764\uFE0F",
+		Timestamp: "10:30 AM",
+		Reactions: []ReactionItem{
+			{Emoji: "thumbsup", Count: 3, HasReacted: false},
+		},
+	}}
+	m := New(msgs, "general")
+	m.SetEmojiContext(EmojiContext{
+		PlaceCtx: emojiutil.PlaceContext{Fetcher: ff},
+		Cells:    2,
+		Customs:  nil,
+	})
+
+	out := m.View(24, 80)
+
+	// The rendered output should contain kitty placeholder runes
+	// (from the warm-path Place calls), NOT the literal ":thumbsup:"
+	// text or the bare unicode glyph.
+	if !strings.Contains(out, "\U0010EEEE") {
+		t.Errorf("rendered view does not contain kitty placeholder runes; image mode appears inactive\noutput=%q", out)
+	}
+	if strings.Contains(out, ":thumbsup:") {
+		t.Errorf("rendered view contains literal :thumbsup: text; image mode did not replace it\noutput=%q", out)
+	}
+}
+
+// TestModel_RenderMessageWithImageEmoji_FlushesThreaded guards against a
+// regression where renderMessagePlain dropped the named-return `flushes`
+// slice (carrying body-text + reaction-pill emoji kitty upload callbacks)
+// in favor of returning only `allFlushes` (carrying blockkit/attachment
+// callbacks). When that happens kitty placeholder runes appear in the
+// rendered output but the image bytes are never transmitted, producing
+// blank cells in the terminal.
+//
+// Asserts: after a View() with image mode + a reaction emoji, at least one
+// cached viewEntry must carry a non-empty flushes slice.
+func TestModel_RenderMessageWithImageEmoji_FlushesThreaded(t *testing.T) {
+	emojiutil.SetImageMode(true, 2)
+	t.Cleanup(func() { emojiutil.SetImageMode(false, 2) })
+
+	thumbURL := emojiutil.CDNBaseURL + "1f44d.png"
+
+	// Sentinel OnFlush makes the produced flush callback observable.
+	// The fake fetcher's prerender memo carries the same callback that
+	// Place returns to the caller; if renderMessagePlain drops the
+	// named-return `flushes` slice, len(e.flushes) will be 0 across the
+	// cache and the assertion below will fire.
+	flushCalled := false
+	ff := newFakePlaceFetcher()
+	ff.setPrerendered(emojiutil.EmojiCacheKey(thumbURL), stdimage.Pt(2, 1), imgpkg.Render{
+		Cells: stdimage.Pt(2, 1),
+		Lines: []string{"\U0010EEEE\U0010EEEE"},
+		OnFlush: func(_ io.Writer) error {
+			flushCalled = true
+			return nil
+		},
+	})
+
+	msgs := []MessageItem{{
+		TS:        "1.0",
+		UserName:  "alice",
+		UserID:    "U1",
+		Text:      "hi :thumbsup:",
+		Timestamp: "10:30 AM",
+		Reactions: []ReactionItem{
+			{Emoji: "thumbsup", Count: 3, HasReacted: false},
+		},
+	}}
+	m := New(msgs, "general")
+	m.SetEmojiContext(EmojiContext{
+		PlaceCtx: emojiutil.PlaceContext{Fetcher: ff},
+		Cells:    2,
+		Customs:  nil,
+	})
+
+	_ = m.View(24, 80)
+
+	var totalFlushes int
+	for _, e := range m.cache {
+		totalFlushes += len(e.flushes)
+	}
+	if totalFlushes == 0 {
+		t.Errorf("expected at least one flush callback in cached entries, got 0 — emoji upload not threaded through renderMessagePlain return")
+	}
+
+	// Invoking the gathered flushes should reach the sentinel OnFlush.
+	// (Defends against a future "we accumulate but never invoke" regression.)
+	for _, e := range m.cache {
+		for _, f := range e.flushes {
+			_ = f(io.Discard)
+		}
+	}
+	if totalFlushes > 0 && !flushCalled {
+		t.Errorf("flush callback present but OnFlush sentinel never fired; the slice may hold the wrong callback")
 	}
 }

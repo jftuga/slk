@@ -48,7 +48,7 @@ Each `EmojiToken` carries both its image URL and its plain-text representation. 
 1. `:shortcode:` matches (existing `shortcodeRe` regex). Resolved against the workspace customs map first (handles alias chains), then kyokomi's codemap (built-in name → codepoint sequence → URL).
 2. Unicode grapheme clusters carrying the `Extended_Pictographic` property. Detected via `uniseg` cluster iteration; codepoint sequence converted to URL.
 
-**URL construction.** Standard emoji: lowercased hex codepoints, dash-joined, U+FE0F (VS16) stripped — matching Slack web's URL convention. Custom emoji: use the URL Slack returns directly; resolve `alias:target` chains with a hop limit. The exact VS16-stripping rules are validated during implementation against a fixture of real Slack URLs captured from a live workspace (`❤️`, `⚠️`, `🏳️‍🌈`, `👨‍🚀`, `👍🏽`, `🇺🇸`).
+**URL construction.** Standard emoji: lowercased hex codepoints, dash-joined; ALL codepoints are preserved (including U+FE0F / VS16). Earlier drafts of this design hypothesized VS16 was stripped to match Slack web's display URLs; empirical fetches against the CDN (`2764.png` → 403, `2764-fe0f.png` → 200) corrected that. Custom emoji: use the URL Slack returns directly; resolve `alias:target` chains with a hop limit. The actual URL shape is locked in by a fixture of real Slack URLs (`❤️`, `⚠️`, `🏳️‍🌈`, `👨‍🚀`, `👍🏽`, `🇺🇸`).
 
 **Per-emoji rendering** follows the same path as inline image attachments today:
 1. Token's URL → `Fetcher.Cached(url, target = 2×1cells)`.
@@ -131,7 +131,7 @@ Documented in `wiki/Configuration.md` and `wiki/Terminal-Compatibility.md` (the 
 
 | Layer | Test type | Proves |
 |---|---|---|
-| `internal/emoji/url.go` | Table-driven unit tests | Codepoints → URL: single, ZWJ, flags, skin tones, VS16 stripping. Fixture seeded from live Slack URLs. |
+| `internal/emoji/url.go` | Table-driven unit tests | Codepoints → URL: single, ZWJ, flags, skin tones, VS16 preserved. Fixture seeded from live Slack URLs. |
 | `internal/emoji/url.go` | Unit tests | Custom emoji: direct, alias hop, alias chain, alias cycle (returns fallback), unknown name. |
 | `internal/emoji/tokens.go` | Unit tests | `ResolveEmojiToTokens` on ASCII-only, all-emoji, mixed, adjacent emoji, start/end positions, broken shortcodes. |
 | `internal/emoji/width.go` | Unit tests | Image-path active: emoji clusters report `emoji_cells`; non-emoji clusters route through probe. Image-path inactive: behavior unchanged. |
@@ -155,7 +155,7 @@ Documented in `wiki/Configuration.md` and `wiki/Terminal-Compatibility.md` (the 
 
 ## Open Questions Resolved During Implementation
 
-- Exact VS16-stripping rules for URL building — validated against a fixture of captured Slack URLs.
+- ~~Exact VS16-stripping rules for URL building~~ — resolved: VS16 is NOT stripped. Slack's CDN preserves every codepoint in the URL path. Locked in by `internal/emoji/testdata/slack_urls.json` and the HTTP probe described in `internal/emoji/url.go`.
 - Empirical perf of N≫10 placements per frame. The unicode-placeholder mode is designed for this, but benchmark on a heavy channel anyway; stagger transmits if transmission throughput is the bottleneck.
 - Whether the picker grid needs prefetch-on-open. Lazy is fine per the cold-cache UX choice; revisit if open-to-render latency is visibly bad.
 

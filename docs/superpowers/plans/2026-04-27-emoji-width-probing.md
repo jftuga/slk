@@ -2,6 +2,8 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
+> **Historical note (post-cleanup):** This plan has been fully reverted. The probe subsystem (`internal/emoji/{probe,cache,terminal,extras,init}.go`), the `--probe-emoji` / `--no-emoji-probe` CLI flags, the disk cache at `~/.cache/slk/emoji-widths-*.json`, and the "Calibrating emoji widths..." startup message were all removed once emoji-as-images shipped as the default kitty render path. `emoji.Width()` now consults only the image-mode branch (see `2026-05-27-emoji-as-images/04-width-and-probe.md`) and falls back to `lipgloss.Width()` otherwise. The narrative below is preserved as history but does not describe current behavior.
+
 **Goal:** Replace heuristic emoji width measurement with actual terminal probes via `CSI 6n` Device Status Reports, cached per terminal identity.
 
 **Architecture:** Add a probe subsystem to `internal/emoji` that runs once on first launch (or when terminal identity changes), queries the terminal for the rendered width of every emoji in the kyokomi codemap, and caches the results to disk. A new `Width()` function uses the cache for emoji and falls back to `lipgloss.Width()` for everything else.

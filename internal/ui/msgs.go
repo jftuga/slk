@@ -18,10 +18,30 @@ import (
 	"time"
 
 	"github.com/gammons/slk/internal/cache"
+	emojiutil "github.com/gammons/slk/internal/emoji"
 	"github.com/gammons/slk/internal/ui/channelfinder"
 	"github.com/gammons/slk/internal/ui/messages"
 	"github.com/gammons/slk/internal/ui/sidebar"
 )
+
+// EmojiImageReadyMsg re-exports emoji.EmojiImageReadyMsg so reducers
+// can refer to it without an extra import. Dispatched when a previously
+// cold-cache emoji finishes fetching and is now warm-renderable across
+// every UI surface that renders emoji.
+type EmojiImageReadyMsg = emojiutil.EmojiImageReadyMsg
+
+// emojiInvalidateMsg is dispatched by the debounce timer scheduled from
+// the EmojiImageReadyMsg reducer arm. When it lands, the App performs a
+// single wholesale cache invalidation across every emoji-rendering
+// surface. All EmojiImageReadyMsg arrivals during the debounce window
+// collapse to this one invalidation — without coalescing a busy channel
+// with N cold-cache emoji would produce N full rebuilds (a few hundred
+// renderMessagePlain calls each) on the UI thread in rapid succession,
+// presenting as a multi-second freeze.
+//
+// Lowercase (unexported) because no other package dispatches this — it
+// is purely an internal debounce signal.
+type emojiInvalidateMsg struct{}
 
 // Messages sent between components
 type (

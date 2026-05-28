@@ -1,9 +1,13 @@
 package emojipicker
 
 import (
+	"context"
+	goimage "image"
+	"strings"
 	"testing"
 
 	"github.com/gammons/slk/internal/emoji"
+	imgpkg "github.com/gammons/slk/internal/image"
 )
 
 func sampleEntries() []emoji.EmojiEntry {
@@ -149,5 +153,95 @@ func TestViewNonEmptyWhenVisibleWithMatches(t *testing.T) {
 	m.Open("ro")
 	if m.View(40) == "" {
 		t.Error("expected non-empty view with matches")
+	}
+}
+
+type fakeDropdownFetcher struct {
+	prerender map[string]imgpkg.Render
+}
+
+func (f *fakeDropdownFetcher) Prerendered(key string, _ goimage.Point, _ imgpkg.Protocol) (imgpkg.Render, bool) {
+	r, ok := f.prerender[key]
+	return r, ok
+}
+func (f *fakeDropdownFetcher) Fetch(_ context.Context, _ imgpkg.FetchRequest) (imgpkg.FetchResult, error) {
+	return imgpkg.FetchResult{}, nil
+}
+
+func TestDropdown_View_ImageMode_UsesPlacement(t *testing.T) {
+	emoji.SetImageMode(true, 2)
+	t.Cleanup(func() { emoji.SetImageMode(false, 2) })
+
+	thumbURL := emoji.CDNBaseURL + "1f44d.png"
+	ff := &fakeDropdownFetcher{
+		prerender: map[string]imgpkg.Render{
+			emoji.EmojiCacheKey(thumbURL): {
+				Cells: goimage.Pt(2, 1),
+				Lines: []string{"\U0010EEEE\U0010EEEE"},
+			},
+		},
+	}
+
+	var m Model
+	m.SetEntries([]emoji.EmojiEntry{
+		{Name: "thumbsup", Display: "\U0001F44D"},
+		{Name: "thumbsdown", Display: "\U0001F44E"},
+	})
+	m.SetEmojiContext(EmojiContext{
+		PlaceCtx: emoji.PlaceContext{Fetcher: ff},
+		Cells:    2,
+	})
+	m.Open("thumbs")
+
+	out := m.View(40)
+	if !strings.Contains(out, "\U0010EEEE") {
+		t.Errorf("autocomplete View does not contain kitty placeholder runes\noutput=%q", out)
+	}
+}
+
+// TestDropdown_ResolvesCustomEmojiURL_AfterSetEmojiCustoms guards the
+// wiring fix: the dropdown must consult the customs map at View() time
+// for URL resolution. Without SetEmojiCustoms, m.emojiCtx.Customs stays
+// empty/nil from startup forever (the initial SetEmojiContext is called
+// before CustomEmojisLoadedMsg arrives), so custom emoji rows fall back
+// to the placeholder glyph instead of the image.
+func TestDropdown_ResolvesCustomEmojiURL_AfterSetEmojiCustoms(t *testing.T) {
+	emoji.SetImageMode(true, 2)
+	t.Cleanup(func() { emoji.SetImageMode(false, 2) })
+
+	customURL := "https://emoji.slack-edge.com/T01/this-is-fine-fire/abc.gif"
+	knownSGR := "\x1b[38;2;0;0;42m"
+	placementLine := knownSGR + "\U0010EEEE\u0305\u0305\U0010EEEE\u0305\u030d\x1b[39m"
+
+	ff := &fakeDropdownFetcher{
+		prerender: map[string]imgpkg.Render{
+			emoji.EmojiCacheKey(customURL): {
+				Cells: goimage.Pt(2, 1),
+				Lines: []string{placementLine},
+			},
+		},
+	}
+
+	var m Model
+	m.SetEntries([]emoji.EmojiEntry{
+		{Name: "this-is-fine-fire", Display: "\u25a1"}, // placeholder glyph for URL-backed
+	})
+	// Initial SetEmojiContext mirrors startup: empty Customs.
+	m.SetEmojiContext(EmojiContext{
+		PlaceCtx: emoji.PlaceContext{Fetcher: ff},
+		Cells:    2,
+		Customs:  nil, // <- the bug condition
+	})
+	// Now CustomEmojisLoadedMsg arrives via the new SetEmojiCustoms path.
+	m.SetEmojiCustoms(map[string]string{
+		"this-is-fine-fire": customURL,
+	})
+
+	m.Open("this-is-fine")
+
+	view := m.View(40)
+	if !strings.Contains(view, knownSGR) {
+		t.Errorf("dropdown View does NOT contain image-ID SGR %q for the custom emoji — Customs not propagated to View()-time URL lookup", knownSGR)
+		t.Logf("rendered view (first 200 chars): %q", view[:min(200, len(view))])
 	}
 }

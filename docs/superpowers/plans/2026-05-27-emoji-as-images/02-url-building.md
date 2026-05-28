@@ -1,6 +1,16 @@
 # Phase 2: URL Building
 
 > Index: `00-overview.md`. Previous: `01-config.md`. Next: `03-token-model.md`.
+>
+> **Correction (post-implementation):** This plan claimed VS16 (`U+FE0F`)
+> should be STRIPPED from URL paths. That was wrong. Slack's CDN preserves
+> every codepoint: `2764.png` returns 403 and `2764-fe0f.png` returns the
+> heart image. The implementation in `internal/emoji/url.go` and the fixture
+> at `internal/emoji/testdata/slack_urls.json` have been corrected. Treat
+> any mention of "VS16 stripped" below as historical-incorrect; the live
+> behavior is "VS16 preserved" (matching every other codepoint). The spec
+> at `docs/superpowers/specs/2026-05-27-emoji-as-images-design.md` is the
+> updated source of truth.
 
 **Goal:** A pure-function library at `internal/emoji/url.go` that converts:
 - A Unicode codepoint sequence (e.g., `[0x1F44D]`, `[0x1F468, 0x200D, 0x1F680]`) into a Slack CDN URL.

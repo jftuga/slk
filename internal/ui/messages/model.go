@@ -307,6 +307,13 @@ type Model struct {
 	// hyperlink form).
 	imgRenderer *imgrender.Renderer
 
+	// emojiCtx bundles the emoji-image rendering dependencies
+	// (PlaceContext, configured cell footprint, workspace customs).
+	// Configured at startup via Model.SetEmojiContext from
+	// cmd/slk/main.go. A zero value disables the image path; the
+	// legacy glyph/shortcode-text branch runs instead.
+	emojiCtx EmojiContext
+
 	// staleEntries is the set of message TSes whose render-cache slot
 	// must be rebuilt before the next View() commit, while sibling
 	// slots are reused verbatim. Populated by HandleImageReady when an
@@ -378,6 +385,26 @@ func (m *Model) SetFocused(focused bool) {
 	m.dirty()
 	debuglog.Perf("messages.SetFocused flip focused=%v msgs=%d selected-row-marked-stale",
 		focused, len(m.messages))
+}
+
+// HandleEmojiImageReady is invoked by the host (App.Update) when an
+// emoji.EmojiImageReadyMsg lands. The same emoji can appear in any
+// visible message, reaction pill, or block-kit element — so the
+// cheapest correct invariant is a wholesale render-cache
+// invalidation. The next View() rebuilds with the now-warm emoji
+// placement (single kitty transmit + N placements per the
+// registry's dedup contract).
+//
+// v1 keeps this coarse; if heavy-emoji channels show measurable
+// invalidation churn (multiple emoji arriving in a burst), a future
+// follow-up can index per-URL → per-message-TS for targeted
+// staleEntries population. Punt for now: kitty image placements are
+// cheap, full re-render of a viewport is sub-frame on the workloads
+// tested.
+func (m *Model) HandleEmojiImageReady(url string) {
+	debuglog.ImgFetch("messages.HandleEmojiImageReady: url=%s wholesale_invalidate", url)
+	m.cache = nil
+	m.dirty()
 }
 
 // HandleImageReady is invoked by the host (App.Update) when an
@@ -1242,6 +1269,41 @@ func (m *Model) SetChannelNames(names map[string]string) {
 	m.dirty()
 }
 
+// EmojiContext bundles the emoji-image rendering dependencies. Held
+// by the Model and threaded through RenderSlackMarkdownWith when
+// building each message's body and reaction pills.
+type EmojiContext struct {
+	PlaceCtx emojiutil.PlaceContext
+	Cells    int               // 1 or 2; 0 falls back to 2
+	Customs  map[string]string // workspace custom emoji map; nil = empty
+}
+
+// SetEmojiContext configures the emoji-image rendering path. Should
+// be called once at startup (from cmd/slk/main.go) after the
+// PlaceContext, Customs map, and EmojiCells are known. Subsequent
+// calls invalidate the render cache so the new context takes effect
+// on the next View().
+func (m *Model) SetEmojiContext(ctx EmojiContext) {
+	if ctx.Cells != 1 && ctx.Cells != 2 {
+		ctx.Cells = 2
+	}
+	m.emojiCtx = ctx
+	m.cache = nil
+	m.dirty()
+}
+
+// SetEmojiCustoms updates only the customs map on the active emoji
+// context, leaving PlaceCtx and Cells untouched. Invalidates the
+// render cache so the new map is consulted on the next View().
+//
+// Called from App.SetCustomEmoji when CustomEmojisLoadedMsg arrives
+// from the workspace bootstrap.
+func (m *Model) SetEmojiCustoms(customs map[string]string) {
+	m.emojiCtx.Customs = customs
+	m.cache = nil
+	m.dirty()
+}
+
 // SetImageContext configures the inline-image rendering pipeline. Should
 // be called once at startup, before the first View(). Subsequent calls
 // invalidate the render cache. A zero-valued ImageContext (or one with
@@ -1673,8 +1735,24 @@ func (m *Model) blockkitContext(msg MessageItem, userNames, channelNames map[str
 		// Capture channelNames in a closure so blockkit's two-arg
 		// RenderText signature stays stable; channel-name resolution
 		// is a host concern.
+		//
+		// blockkit's RenderText is called from inside block rendering
+		// where the per-call flush accumulator isn't accessible. Pass
+		// the emoji opts but no flush collector: warm-path emoji
+		// flushes inside rich-text blocks are best-effort in v1
+		// (they'll be re-collected on the next render when the
+		// per-message buildCache walks the entry again). Worst case:
+		// one extra frame of cold-cache spacing for a block-kit
+		// emoji on first reveal. Acceptable.
 		RenderText: func(s string, un map[string]string) string {
-			return RenderSlackMarkdown(s, un, channelNames)
+			return RenderSlackMarkdownWith(s, RenderSlackMarkdownOpts{
+				UserNames:    un,
+				ChannelNames: channelNames,
+				PlaceCtx:     m.emojiCtx.PlaceCtx,
+				EmojiCells:   m.emojiCtx.Cells,
+				Customs:      m.emojiCtx.Customs,
+				EmojiFlushes: nil,
+			})
 		},
 		WrapText: WordWrap,
 		SendMsg: func(v any) {
@@ -1719,7 +1797,20 @@ func (m *Model) renderMessagePlain(msg MessageItem, width int, avatarStr string,
 	if stats != nil {
 		bodyT0 = time.Now()
 	}
-	text := styles.MessageText.Render(WordWrap(RenderSlackMarkdown(MessageTextSource(msg), userNames, channelNames), contentWidth))
+	// Emoji-image opts pass through the active EmojiContext; when
+	// image mode is off (or PlaceCtx.Fetcher is nil) RenderSlackMarkdownWith
+	// falls through to the legacy glyph/shortcode-text path. Warm-path
+	// emoji flushes land in the same per-message `flushes` named-return
+	// slice the View() loop walks for inline-image attachments.
+	bodyOpts := RenderSlackMarkdownOpts{
+		UserNames:    userNames,
+		ChannelNames: channelNames,
+		PlaceCtx:     m.emojiCtx.PlaceCtx,
+		EmojiCells:   m.emojiCtx.Cells,
+		Customs:      m.emojiCtx.Customs,
+		EmojiFlushes: &flushes,
+	}
+	text := styles.MessageText.Render(WordWrap(RenderSlackMarkdownWith(MessageTextSource(msg), bodyOpts), contentWidth))
 	if stats != nil {
 		stats.bodyTotal += time.Since(bodyT0)
 	}
@@ -1761,27 +1852,48 @@ func (m *Model) renderMessagePlain(msg MessageItem, width int, avatarStr string,
 		// target). Tracked separately because the index in pills can
 		// exceed len(msg.Reactions).
 		var pillEmojis []string
+		// Image-aware emoji-as-image path is active only when the
+		// process-global ImageMode is on AND a fetcher has been
+		// installed via SetEmojiContext. Otherwise the legacy
+		// glyph/shortcode-text branch renders.
+		imageOK := emojiutil.ImageModeActive() && m.emojiCtx.PlaceCtx.Fetcher != nil
+		pillCells := m.emojiCtx.Cells
+		if pillCells <= 0 {
+			pillCells = 2
+		}
 		for i, r := range msg.Reactions {
-			// Drop any skin-tone modifier suffix so the pill renders the
-			// base emoji at a well-known width. Skin-toned glyphs render
-			// inconsistently across terminals and tend to break border
-			// alignment regardless of how we measure them.
+			// Image path: pass r.Emoji directly (including any skin-tone
+			// suffix) — URLForShortcode composes the per-tone CDN URL
+			// natively. Stripping skin tone was a workaround for
+			// glyph-rendering width inconsistencies that no longer apply
+			// at the kitty-image cell footprint.
 			//
-			// Resolve the shortcode to Unicode and check whether the
-			// resolved form is composition-safe. Multi-codepoint
-			// sequences (ZWJ flags, regional-indicator flag pairs,
-			// any residual skin-tone modifiers) render as broken
-			// glyphs in many terminal fonts and break right-border
-			// alignment; in those cases we display the readable
-			// :shortcode: text instead. See
-			// internal/emoji/shouldrender.go for the rule.
-			nameForLookup := emojiutil.StripSkinTone(r.Emoji)
-			resolved := kyoemoji.Sprint(":" + nameForLookup + ":")
+			// Legacy path: still strip the suffix because the glyph
+			// renderer suffers the original width-inconsistency problem
+			// (multi-codepoint ZWJ / skin-tone sequences render at
+			// terminal-dependent widths and break border alignment).
+			// See internal/emoji/shouldrender.go for the rule.
 			var emojiStr string
-			if emojiutil.ShouldRenderUnicode(resolved) {
-				emojiStr = resolved
-			} else {
-				emojiStr = ":" + nameForLookup + ":"
+			var placedFlush func(io.Writer) error
+			if imageOK {
+				if url, ok := emojiutil.URLForShortcode(r.Emoji, m.emojiCtx.Customs); ok {
+					if placement, flush, ok := emojiutil.Place(m.emojiCtx.PlaceCtx, url, pillCells); ok {
+						emojiStr = placement
+						placedFlush = flush
+					}
+				}
+			}
+			if emojiStr == "" {
+				// Legacy fallback path (image mode off, no URL, or
+				// Place returned false). Strip skin tone here only —
+				// the glyph renderer still needs the workaround.
+				legacyName := emojiutil.StripSkinTone(r.Emoji)
+				resolved := kyoemoji.Sprint(":" + legacyName + ":")
+				if emojiutil.ShouldRenderUnicode(resolved) {
+					emojiStr = resolved
+				} else {
+					emojiStr = ":" + legacyName + ":"
+				}
 			}
 			pillText := fmt.Sprintf("%s%d", emojiStr, r.Count)
 			var style lipgloss.Style
@@ -1794,6 +1906,12 @@ func (m *Model) renderMessagePlain(msg MessageItem, width int, avatarStr string,
 			}
 			pills = append(pills, style.Render(pillText))
 			pillEmojis = append(pillEmojis, r.Emoji)
+			// Image emoji in reaction pills land in the same per-frame
+			// flush list as body text and inline image attachments —
+			// the View() loop walks `flushes` once per visible frame.
+			if placedFlush != nil {
+				flushes = append(flushes, placedFlush)
+			}
 		}
 		if isSelected && m.reactionNavActive {
 			plusStyle := styles.ReactionPillPlus
@@ -2074,7 +2192,14 @@ func (m *Model) renderMessagePlain(msg MessageItem, width int, avatarStr string,
 	if len(allSixel) == 0 {
 		allSixel = nil
 	}
-	return msgContent, allFlushes, allSixel, hits, reactionHits
+	// Merge body-text + reaction-pill emoji flushes (the named-return
+	// `flushes` slice, appended to at lines ~1811 / ~1914) with
+	// blockkit / legacy-attachment / image-attachment flushes
+	// (`allFlushes`). The two parallel accumulators are a v1 quirk of
+	// Phase 6's wiring; without this merge the body+reaction emoji
+	// kitty uploads would be silently dropped here and the terminal
+	// would show blank cells where placeholder runes were rendered.
+	return msgContent, append(allFlushes, flushes...), allSixel, hits, reactionHits
 }
 
 

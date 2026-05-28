@@ -2,6 +2,8 @@
 
 > Index: `00-overview.md`. Previous: `03-token-model.md`. Next: `05-place-helper.md`.
 
+> **Historical note (post-cleanup):** The startup width probe described in this phase has since been removed entirely. With image-emoji rendering as the default on kitty and the plan to deprecate non-kitty rendering paths, the probe became dead weight. `internal/emoji/{probe,cache,terminal,extras,init}.go` and their tests were deleted; `Width()` now falls back to `lipgloss.Width()` when image mode is inactive. The image-mode branch documented below remains the active code path. See the `refactor(emoji): remove startup width-probe machinery` commit.
+
 **Goal:** When emoji-image mode is active (kitty + `EmojiImages=on`), make `emojiutil.Width()` report a fixed 2 cells (configurable via `EmojiCells`) for every emoji-renderable grapheme cluster, bypassing the probe map. Also skip the startup emoji width probe entirely in that mode, saving ~200ms-30s of user-visible startup cost.
 
 The mode is a single process-global toggle set once at startup before bubbletea starts. Width math consults the toggle on every measurement.

@@ -2,11 +2,13 @@ package emojipicker
 
 import (
 	"fmt"
+	"io"
 	"strings"
 
 	"charm.land/lipgloss/v2"
 
 	"github.com/gammons/slk/internal/emoji"
+	imgpkg "github.com/gammons/slk/internal/image"
 	"github.com/gammons/slk/internal/text"
 	"github.com/gammons/slk/internal/ui/styles"
 )
@@ -21,7 +23,48 @@ type Model struct {
 	query    string
 	selected int
 	visible  bool
+	emojiCtx EmojiContext
 }
+
+// EmojiContext bundles the emoji-image rendering dependencies for
+// the compose autocomplete dropdown. Mirrors the picker's version
+// in shape and purpose. The Customs field is unused here because the
+// entries the dropdown searches already include workspace customs
+// (see emoji.BuildEntries); it's kept for shape parity with the
+// other emoji-context types so all callers use the same setter
+// signature.
+type EmojiContext struct {
+	PlaceCtx emoji.PlaceContext
+	Cells    int
+	Customs  map[string]string
+}
+
+// SetEmojiContext configures emoji-image rendering for the autocomplete
+// dropdown. Mirrors the same setter on other UI surfaces.
+func (m *Model) SetEmojiContext(ctx EmojiContext) {
+	if ctx.Cells != 1 && ctx.Cells != 2 {
+		ctx.Cells = 2
+	}
+	m.emojiCtx = ctx
+}
+
+// SetEmojiCustoms updates the customs map without changing PlaceCtx
+// or Cells. Called from compose.SetEmojiCustoms when the workspace's
+// custom emoji list arrives via CustomEmojisLoadedMsg.
+//
+// Mirrors reactionpicker.Model.SetEmojiCustoms — the picker reads
+// m.emojiCtx.Customs at View() time when resolving each row's URL
+// (model.go:185 calls URLForShortcode(name, m.emojiCtx.Customs)).
+// Without this method the dropdown's customs map stayed at its
+// startup-empty value forever, so custom emoji rows fell back to
+// the placeholder glyph rendering.
+func (m *Model) SetEmojiCustoms(customs map[string]string) {
+	m.emojiCtx.Customs = customs
+}
+
+// HandleEmojiImageReady is a no-op hook for shape parity with other
+// surfaces. The dropdown has no render cache.
+func (m *Model) HandleEmojiImageReady(_ string) {}
 
 func New() Model { return Model{} }
 
@@ -125,6 +168,23 @@ func (m Model) View(width int) string {
 		}
 	}
 
+	// Image-aware emoji-as-image path: active only when the
+	// process-global ImageMode is on AND a fetcher has been installed
+	// via SetEmojiContext. Otherwise the legacy `e.Display` branch
+	// renders (byte-identical to pre-Phase-9).
+	imageOK := emoji.ImageModeActive() && m.emojiCtx.PlaceCtx.Fetcher != nil
+	cells := m.emojiCtx.Cells
+	if cells <= 0 {
+		cells = 2
+	}
+	// Collect any kitty-upload callbacks Place produced into this
+	// per-View local slice and fire them against imgpkg.KittyOutput
+	// just before returning. Most are no-ops in steady state (the
+	// messages-pane already uploaded via the shared Registry); the
+	// dropdown still owns the fire to handle the case where it's the
+	// first/only surface to reference a given emoji this session.
+	var pendingFlushes []func(io.Writer) error
+
 	var rows []string
 	for i, e := range m.filtered {
 		indicator := "  "
@@ -133,12 +193,28 @@ func (m Model) View(width int) string {
 			indicator = lipgloss.NewStyle().Foreground(styles.Accent).Render("▌ ")
 			nameStyle = nameStyle.Bold(true)
 		}
+
+		var preview string
+		if imageOK {
+			if url, ok := emoji.URLForShortcode(e.Name, m.emojiCtx.Customs); ok {
+				if placement, flush, ok := emoji.Place(m.emojiCtx.PlaceCtx, url, cells); ok {
+					preview = placement
+					if flush != nil {
+						pendingFlushes = append(pendingFlushes, flush)
+					}
+				}
+			}
+		}
+		if preview == "" {
+			preview = e.Display
+		}
+
 		// Pad preview cell so all names start at the same column.
-		pad := previewWidth - lipgloss.Width(e.Display)
+		pad := previewWidth - lipgloss.Width(preview)
 		if pad < 0 {
 			pad = 0
 		}
-		preview := e.Display + strings.Repeat(" ", pad)
+		preview = preview + strings.Repeat(" ", pad)
 		row := fmt.Sprintf("%s%s  %s", indicator, preview, nameStyle.Render(":"+e.Name+":"))
 		rows = append(rows, row)
 	}
@@ -150,5 +226,12 @@ func (m Model) View(width int) string {
 		Background(styles.SurfaceDark).
 		Width(width - 2).
 		Render(content)
+
+	// Fire any kitty image upload callbacks the per-row Place calls
+	// produced. Done here (inside View) so the autocomplete dropdown
+	// owns kitty uploads independently of any other surface.
+	for _, fl := range pendingFlushes {
+		_ = fl(imgpkg.KittyOutput)
+	}
 	return box
 }

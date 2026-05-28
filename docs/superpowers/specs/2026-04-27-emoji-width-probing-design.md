@@ -1,5 +1,7 @@
 # Terminal Emoji Width Probing — Design
 
+> **Historical note (post-cleanup):** The design described here was implemented but is no longer active. The probe subsystem was removed once emoji-as-images became the default kitty render path; see `2026-05-27-emoji-as-images/04-width-and-probe.md` for the replacement behavior.
+
 ## Problem
 
 No width-measurement library can reliably predict how a terminal will render any given emoji. Different terminals (kitty, alacritty, iTerm2, WezTerm, ghostty, etc.) have their own emoji width tables that drift over time and disagree with each other. Heuristics based on Unicode properties — Extended_Pictographic, Emoji_Presentation, VS16, skin-tone modifiers — only approximate terminal behavior.

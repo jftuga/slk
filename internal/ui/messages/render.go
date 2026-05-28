@@ -3,6 +3,7 @@ package messages
 import (
 	"fmt"
 	"image/color"
+	"io"
 	"regexp"
 	"strings"
 	"unicode"
@@ -594,13 +595,49 @@ func SidebarMutedFgANSI() string {
 	return cachedSidebarMutedFgANSI
 }
 
+// RenderSlackMarkdownOpts extends the legacy 3-arg RenderSlackMarkdown
+// signature with optional emoji-image rendering. When PlaceCtx.Fetcher
+// is non-nil AND emoji.ImageModeActive() returns true, emoji are
+// rendered as kitty image placements via emoji.Place; otherwise the
+// legacy glyph/shortcode-text path runs (byte-identical to the
+// 3-arg form).
+//
+// EmojiFlushes accumulates kitty image upload callbacks for the warm
+// path. nil disables flush collection (cold-only callers, or callers
+// that don't care about flushes — e.g., tests).
+type RenderSlackMarkdownOpts struct {
+	UserNames    map[string]string
+	ChannelNames map[string]string
+
+	// Emoji-image opts (zero values disable the image path).
+	PlaceCtx     emojiutil.PlaceContext
+	EmojiCells   int                      // 0 falls back to 2
+	Customs      map[string]string        // workspace custom emoji map; may be nil
+	EmojiFlushes *[]func(io.Writer) error // append-only; may be nil
+}
+
 // RenderSlackMarkdown converts Slack-flavored markdown and emoji shortcodes
 // into lipgloss-styled terminal output. If userNames is provided, user mentions
 // like <@U1234> are resolved to display names. If channelNames is provided,
 // bare <#C1234> channel mentions (without an embedded name) are resolved
 // to #channel-name; mentions that already carry the embedded |name form
 // don't need the map.
+//
+// RenderSlackMarkdown is the legacy 3-arg entry point preserved for all
+// callers that don't need emoji-image rendering (tests, threads view
+// preview, etc.). New code should use RenderSlackMarkdownWith to get the
+// image-path branch.
 func RenderSlackMarkdown(text string, userNames map[string]string, channelNames map[string]string) string {
+	return RenderSlackMarkdownWith(text, RenderSlackMarkdownOpts{
+		UserNames:    userNames,
+		ChannelNames: channelNames,
+	})
+}
+
+// RenderSlackMarkdownWith is the full-featured entry point. See
+// RenderSlackMarkdownOpts for the per-call configuration. With a zero
+// opts struct it is byte-identical to RenderSlackMarkdown.
+func RenderSlackMarkdownWith(text string, opts RenderSlackMarkdownOpts) string {
 	// Handle code blocks first (before other formatting to avoid conflicts)
 	text = codeBlockRe.ReplaceAllStringFunc(text, func(match string) string {
 		inner := codeBlockRe.FindStringSubmatch(match)[1]
@@ -618,7 +655,7 @@ func RenderSlackMarkdown(text string, userNames map[string]string, channelNames 
 			quoted = slackEntityDecoder.Replace(quoted)
 			line = blockquoteStyle().Render(quoted)
 		} else {
-			line = renderInlineFormatting(line, userNames, channelNames)
+			line = renderInlineFormattingWith(line, opts)
 			// Decode Slack-escaped entities after markup regexes have
 			// consumed legitimate <...> markers, so escaped user input
 			// (e.g. literal "<@U1>") doesn't become a fake mention.
@@ -640,7 +677,9 @@ func RenderSlackMarkdown(text string, userNames map[string]string, channelNames 
 	return output
 }
 
-func renderInlineFormatting(text string, userNames map[string]string, channelNames map[string]string) string {
+func renderInlineFormattingWith(text string, opts RenderSlackMarkdownOpts) string {
+	userNames := opts.UserNames
+	channelNames := opts.ChannelNames
 	// Inline code (before bold/italic to avoid conflicts inside code)
 	text = inlineCodeRe.ReplaceAllStringFunc(text, func(match string) string {
 		inner := inlineCodeRe.FindStringSubmatch(match)[1]
@@ -722,18 +761,79 @@ func renderInlineFormatting(text string, userNames map[string]string, channelNam
 		return mentionStyle().Render("@" + name)
 	})
 
-	// Emoji shortcodes: :red_circle: -> 🔴, but only when the resolved
-	// Unicode form is composition-safe (single codepoint or VS16-
-	// anchored). ZWJ sequences, flag pairs, and skin-tone modifiers
-	// stay as readable :shortcode: text — they break terminal width
-	// arithmetic on many fonts. See internal/emoji/shouldrender.go.
+	// Emoji resolution.
 	//
-	// StripSkinToneFromText runs first because skin-toned shortcodes
-	// (e.g. :wave_tone3:) should resolve as their base name (:wave:)
-	// rather than be left as literal text.
-	text = emojiutil.ResolveShortcodesInText(emojiutil.StripSkinToneFromText(text))
+	// Image path (kitty + emoji_images=on): tokenize the text and
+	// render emoji as kitty image placements via emoji.Place. The
+	// width math (set up by Phase 4) already reports the configured
+	// cell footprint for every image-renderable cluster, so layout
+	// is deterministic regardless of font.
+	//
+	// Legacy path: the glyph/shortcode-text substitution that
+	// retained ":name:" for multi-codepoint sequences. See
+	// internal/emoji/shouldrender.go. StripSkinToneFromText runs
+	// first because skin-toned shortcodes (e.g. :wave_tone3:)
+	// should resolve as their base name (:wave:) rather than be
+	// left as literal text.
+	//
+	// Image path: preserve skin-tone suffixes — the URL builder
+	// routes them to the correct per-tone Slack CDN asset. The
+	// old StripSkinToneFromText call was a glyph-rendering width
+	// workaround that doesn't apply to kitty-image placements.
+	if emojiutil.ImageModeActive() && opts.PlaceCtx.Fetcher != nil {
+		tokens := emojiutil.ResolveEmojiToTokens(text, opts.Customs)
+		text = renderEmojiTokensInline(tokens, opts.PlaceCtx, opts.EmojiCells, opts.EmojiFlushes)
+	} else {
+		text = emojiutil.ResolveShortcodesInText(emojiutil.StripSkinToneFromText(text))
+	}
 
 	return text
+}
+
+// renderEmojiTokensInline walks a Token stream and returns the
+// rendered inline string. Emoji tokens are placed via emoji.Place
+// when the image path is active (emoji.ImageModeActive() AND
+// placeCtx.Fetcher != nil); otherwise they render as their plain-text
+// representation (the source-form text already captured on the
+// Token).
+//
+// Kitty image upload callbacks collected on the warm path are
+// appended to *flushes when non-nil. flushes left nil disables
+// collection (caller doesn't care; cold-path callers).
+func renderEmojiTokensInline(
+	tokens []emojiutil.Token,
+	placeCtx emojiutil.PlaceContext,
+	cells int,
+	flushes *[]func(io.Writer) error,
+) string {
+	if cells <= 0 {
+		cells = 2
+	}
+	imageOK := emojiutil.ImageModeActive() && placeCtx.Fetcher != nil
+
+	var b strings.Builder
+	for _, tok := range tokens {
+		switch tok.Kind {
+		case emojiutil.TokenText:
+			b.WriteString(tok.Text)
+		case emojiutil.TokenEmoji:
+			if imageOK && tok.URL != "" {
+				placement, flush, ok := emojiutil.Place(placeCtx, tok.URL, cells)
+				if ok {
+					b.WriteString(placement)
+					if flush != nil && flushes != nil {
+						*flushes = append(*flushes, flush)
+					}
+					continue
+				}
+			}
+			// Fallback: plain-text form (":name:" for unresolved
+			// shortcodes / image-mode off, or the source-form glyph
+			// for raw-codepoint emoji that bypassed Place).
+			b.WriteString(tok.Text)
+		}
+	}
+	return b.String()
 }
 
 // renderItalics wraps `_X_` runs in italicStyle when the surrounding

@@ -4,6 +4,7 @@ import (
 	"strings"
 
 	"charm.land/lipgloss/v2"
+	"github.com/charmbracelet/x/ansi"
 
 	"github.com/gammons/slk/internal/image"
 )
@@ -112,5 +113,53 @@ func DimmedOverlay(width, height int, background string, box string, dimPercent 
 		}
 	}
 
-	return outCanvas.Render()
+	output := outCanvas.Render()
+
+	// Step 5: Patch kitty-placement rows back to their original bytes.
+	//
+	// The canvas's cell-by-cell store/emit path bundles per-cell style
+	// (e.g. Bold) into the SGR it writes before each rune, mutating the
+	// pristine "\x1b[38;2;0;0;Bm" foreground that buildPlaceholderLines
+	// emits into something like "\x1b[38;2;0;0;B;1m". The RGB triple
+	// (which carries the kitty image ID) survives, but in practice
+	// terminals will not detect the placeholder as a kitty image when
+	// the SGR carries extra attributes — the cell renders blank.
+	//
+	// Fix: for any modal row that contains a kitty placeholder rune,
+	// splice the ORIGINAL box row (exact byte-for-byte SGR + rune +
+	// diacritic sequence) into the corresponding output row at column
+	// startX. Use ansi-aware Truncate / TruncateLeft so the splice is
+	// width-correct and doesn't break escape sequences in the
+	// surrounding (dimmed background) content.
+	hasPlacement := false
+	boxLines := strings.Split(box, "\n")
+	for _, ln := range boxLines {
+		if strings.Contains(ln, kittyPlaceholderPrefix) {
+			hasPlacement = true
+			break
+		}
+	}
+	if !hasPlacement {
+		return output
+	}
+
+	outputLines := strings.Split(output, "\n")
+	for my, boxLine := range boxLines {
+		if !strings.Contains(boxLine, kittyPlaceholderPrefix) {
+			continue
+		}
+		outRow := startY + my
+		if outRow < 0 || outRow >= len(outputLines) {
+			continue
+		}
+		original := outputLines[outRow]
+		prefix := ansi.Truncate(original, startX, "")
+		suffix := ansi.TruncateLeft(original, startX+modalW, "")
+		// Reset between prefix and modal content so the dimmed
+		// background's SGR doesn't leak into the placement; the
+		// placement string itself begins with its own FG SGR. Same
+		// for the trailing edge.
+		outputLines[outRow] = prefix + "\x1b[m" + boxLine + "\x1b[m" + suffix
+	}
+	return strings.Join(outputLines, "\n")
 }

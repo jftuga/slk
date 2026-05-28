@@ -1,12 +1,18 @@
 package messages
 
 import (
+	"context"
+	"fmt"
+	goimage "image"
 	"image/color"
+	"io"
 	"strings"
 	"testing"
 
 	"charm.land/lipgloss/v2"
 	"github.com/charmbracelet/x/ansi"
+	emojiutil "github.com/gammons/slk/internal/emoji"
+	imgpkg "github.com/gammons/slk/internal/image"
 
 	"github.com/gammons/slk/internal/config"
 	"github.com/gammons/slk/internal/ui/styles"
@@ -444,6 +450,112 @@ func TestEscapedAngleBracketsNotMistakenForMention(t *testing.T) {
 	if !strings.Contains(plain, "<@U123>") {
 		t.Errorf("expected literal %q, got %q", "<@U123>", plain)
 	}
+}
+
+func TestRenderEmojiTokensInline_ImageModeOff(t *testing.T) {
+	// With image mode off, the helper returns the literal text of
+	// each token verbatim — including the :name: form of unresolved
+	// emoji. This is the fallback path; production goes through the
+	// legacy ResolveShortcodesInText pipeline when image mode is off.
+	emojiutil.SetImageMode(false, 2)
+	t.Cleanup(func() { emojiutil.SetImageMode(false, 2) })
+
+	thumbURL := emojiutil.CDNBaseURL + "1f44d.png"
+	tokens := []emojiutil.Token{
+		{Kind: emojiutil.TokenText, Text: "hi "},
+		{Kind: emojiutil.TokenEmoji, Text: ":thumbsup:", URL: thumbURL},
+		{Kind: emojiutil.TokenText, Text: " bye"},
+	}
+
+	var flushes []func(io.Writer) error
+	got := renderEmojiTokensInline(tokens, emojiutil.PlaceContext{}, 2, &flushes)
+	want := "hi :thumbsup: bye"
+	if got != want {
+		t.Errorf("renderEmojiTokensInline image-off = %q, want %q", got, want)
+	}
+	if len(flushes) != 0 {
+		t.Errorf("flushes collected with image-off path = %d, want 0", len(flushes))
+	}
+}
+
+func TestRenderEmojiTokensInline_ImageModeOn_ColdPath(t *testing.T) {
+	emojiutil.SetImageMode(true, 2)
+	t.Cleanup(func() { emojiutil.SetImageMode(false, 2) })
+
+	thumbURL := emojiutil.CDNBaseURL + "1f44d.png"
+	tokens := []emojiutil.Token{
+		{Kind: emojiutil.TokenText, Text: "hi "},
+		{Kind: emojiutil.TokenEmoji, Text: ":thumbsup:", URL: thumbURL},
+	}
+
+	// fakePlaceFetcher always reports cold (Prerendered miss).
+	// fetchFn never called because we don't drain the goroutine here.
+	ff := newFakePlaceFetcher()
+	pctx := emojiutil.PlaceContext{Fetcher: ff, SendMsg: func(any) {}}
+
+	var flushes []func(io.Writer) error
+	got := renderEmojiTokensInline(tokens, pctx, 2, &flushes)
+	want := "hi   " // text + 2 spaces for cold-cache emoji
+	if got != want {
+		t.Errorf("renderEmojiTokensInline cold-path = %q, want %q", got, want)
+	}
+	if len(flushes) != 0 {
+		t.Errorf("cold-path flushes = %d, want 0", len(flushes))
+	}
+}
+
+func TestRenderEmojiTokensInline_ImageModeOn_WarmPath(t *testing.T) {
+	emojiutil.SetImageMode(true, 2)
+	t.Cleanup(func() { emojiutil.SetImageMode(false, 2) })
+
+	thumbURL := emojiutil.CDNBaseURL + "1f44d.png"
+	tokens := []emojiutil.Token{
+		{Kind: emojiutil.TokenEmoji, Text: ":thumbsup:", URL: thumbURL},
+		{Kind: emojiutil.TokenText, Text: "!"},
+	}
+
+	ff := newFakePlaceFetcher()
+	ff.setPrerendered(emojiutil.EmojiCacheKey(thumbURL), goimage.Pt(2, 1), imgpkg.Render{
+		Cells:   goimage.Pt(2, 1),
+		Lines:   []string{"\U0010EEEE\U0010EEEE"},
+		OnFlush: func(io.Writer) error { return nil },
+	})
+	pctx := emojiutil.PlaceContext{Fetcher: ff}
+
+	var flushes []func(io.Writer) error
+	got := renderEmojiTokensInline(tokens, pctx, 2, &flushes)
+	want := "\U0010EEEE\U0010EEEE!"
+	if got != want {
+		t.Errorf("renderEmojiTokensInline warm = %q, want %q", got, want)
+	}
+	if len(flushes) != 1 {
+		t.Errorf("warm-path flushes = %d, want 1", len(flushes))
+	}
+}
+
+// fakePlaceFetcher is a test fake for emojiutil.PlaceFetcher.
+// (Lives in render_test.go since it's used here and by model_test.go
+// for the integration test; the equivalent fake inside
+// internal/emoji's place_test.go is separate.)
+type fakePlaceFetcher struct {
+	prerender map[string]imgpkg.Render
+}
+
+func newFakePlaceFetcher() *fakePlaceFetcher {
+	return &fakePlaceFetcher{prerender: map[string]imgpkg.Render{}}
+}
+
+func (f *fakePlaceFetcher) setPrerendered(key string, t goimage.Point, r imgpkg.Render) {
+	f.prerender[fmt.Sprintf("%s|%dx%d", key, t.X, t.Y)] = r
+}
+
+func (f *fakePlaceFetcher) Prerendered(key string, t goimage.Point, proto imgpkg.Protocol) (imgpkg.Render, bool) {
+	r, ok := f.prerender[fmt.Sprintf("%s|%dx%d", key, t.X, t.Y)]
+	return r, ok
+}
+
+func (f *fakePlaceFetcher) Fetch(ctx context.Context, req imgpkg.FetchRequest) (imgpkg.FetchResult, error) {
+	return imgpkg.FetchResult{}, nil
 }
 
 // TestBgANSIForBasicColor asserts that bgANSIFor emits native ANSI 16
