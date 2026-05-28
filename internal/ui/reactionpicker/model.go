@@ -1,6 +1,7 @@
 package reactionpicker
 
 import (
+	"io"
 	"sort"
 	"strings"
 
@@ -9,6 +10,7 @@ import (
 	"github.com/muesli/reflow/truncate"
 
 	slkemoji "github.com/gammons/slk/internal/emoji"
+	imgpkg "github.com/gammons/slk/internal/image"
 	"github.com/gammons/slk/internal/text"
 	"github.com/gammons/slk/internal/ui/messages"
 	"github.com/gammons/slk/internal/ui/overlay"
@@ -371,6 +373,25 @@ func (m *Model) renderBox(termWidth int) string {
 	thumbStyle := lipgloss.NewStyle().Background(bg).Foreground(styles.Primary)
 	trackStyle := lipgloss.NewStyle().Background(bg).Foreground(styles.Border)
 
+	// Image-aware emoji-as-image path: active only when the
+	// process-global ImageMode is on AND a fetcher has been installed
+	// via SetEmojiContext. Otherwise the legacy ShouldRenderUnicode /
+	// shortcode-text branch renders (byte-identical to pre-Phase-8).
+	imageOK := slkemoji.ImageModeActive() && m.emojiCtx.PlaceCtx.Fetcher != nil
+	cells := m.emojiCtx.Cells
+	if cells <= 0 {
+		cells = 2
+	}
+	// Unlike messages.View, the picker has no per-frame Flushes slice
+	// walked by the host renderer. We collect any kitty-upload
+	// callbacks Place produced into this per-View local slice and
+	// fire them against imgpkg.KittyOutput just before returning.
+	// Most are no-ops in steady state (the messages-pane already
+	// uploaded via the shared Registry); the picker still owns the
+	// fire to handle the case where it's the first/only surface to
+	// reference a given emoji this session.
+	var pendingFlushes []func(io.Writer) error
+
 	var resultRows []string
 	for i := start; i < end; i++ {
 		entry := list[i]
@@ -380,12 +401,27 @@ func (m *Model) renderBox(termWidth int) string {
 		// tones) render as broken glyphs in many terminal fonts and
 		// corrupt the picker's width arithmetic. See
 		// internal/emoji/shouldrender.go.
-		var line string
-		if slkemoji.ShouldRenderUnicode(entry.Unicode) {
-			line = entry.Unicode + " " + entry.Name
-		} else {
-			line = ":" + entry.Name + ":"
+		var preview string
+		if imageOK {
+			if url, ok := slkemoji.URLForShortcode(entry.Name, m.emojiCtx.Customs); ok {
+				if placement, flush, ok := slkemoji.Place(m.emojiCtx.PlaceCtx, url, cells); ok {
+					preview = placement
+					if flush != nil {
+						pendingFlushes = append(pendingFlushes, flush)
+					}
+				}
+			}
 		}
+		if preview == "" {
+			// Legacy fallback path (image mode off, no URL, or
+			// Place returned false).
+			if slkemoji.ShouldRenderUnicode(entry.Unicode) {
+				preview = entry.Unicode
+			} else {
+				preview = ":" + entry.Name + ":"
+			}
+		}
+		line := preview + " " + entry.Name
 
 		if m.isExistingReaction(entry.Name) {
 			line += " ✓"
@@ -443,7 +479,7 @@ func (m *Model) renderBox(termWidth int) string {
 	content = messages.ReapplyBgAfterResets(content, messages.BgANSI()+messages.FgANSI())
 
 	// Wrap in bordered box
-	return lipgloss.NewStyle().
+	box := lipgloss.NewStyle().
 		Border(lipgloss.RoundedBorder()).
 		BorderForeground(styles.Primary).
 		BorderBackground(bg).
@@ -451,4 +487,17 @@ func (m *Model) renderBox(termWidth int) string {
 		Padding(1, 1).
 		Width(overlayWidth).
 		Render(content)
+
+	// Fire any kitty image upload callbacks the per-row Place calls
+	// produced. Most are no-ops (the messages pane already triggered
+	// the upload via the shared Registry); the picker still owns the
+	// fire to handle the case where it's the first/only surface to
+	// reference a given emoji this session. Done here (inside
+	// renderBox) so both View() and ViewOverlay() benefit without
+	// duplication.
+	for _, fl := range pendingFlushes {
+		_ = fl(imgpkg.KittyOutput)
+	}
+
+	return box
 }
