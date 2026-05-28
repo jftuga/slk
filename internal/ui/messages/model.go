@@ -1715,8 +1715,24 @@ func (m *Model) blockkitContext(msg MessageItem, userNames, channelNames map[str
 		// Capture channelNames in a closure so blockkit's two-arg
 		// RenderText signature stays stable; channel-name resolution
 		// is a host concern.
+		//
+		// blockkit's RenderText is called from inside block rendering
+		// where the per-call flush accumulator isn't accessible. Pass
+		// the emoji opts but no flush collector: warm-path emoji
+		// flushes inside rich-text blocks are best-effort in v1
+		// (they'll be re-collected on the next render when the
+		// per-message buildCache walks the entry again). Worst case:
+		// one extra frame of cold-cache spacing for a block-kit
+		// emoji on first reveal. Acceptable.
 		RenderText: func(s string, un map[string]string) string {
-			return RenderSlackMarkdown(s, un, channelNames)
+			return RenderSlackMarkdownWith(s, RenderSlackMarkdownOpts{
+				UserNames:    un,
+				ChannelNames: channelNames,
+				PlaceCtx:     m.emojiCtx.PlaceCtx,
+				EmojiCells:   m.emojiCtx.Cells,
+				Customs:      m.emojiCtx.Customs,
+				EmojiFlushes: nil,
+			})
 		},
 		WrapText: WordWrap,
 		SendMsg: func(v any) {
@@ -1761,7 +1777,20 @@ func (m *Model) renderMessagePlain(msg MessageItem, width int, avatarStr string,
 	if stats != nil {
 		bodyT0 = time.Now()
 	}
-	text := styles.MessageText.Render(WordWrap(RenderSlackMarkdown(MessageTextSource(msg), userNames, channelNames), contentWidth))
+	// Emoji-image opts pass through the active EmojiContext; when
+	// image mode is off (or PlaceCtx.Fetcher is nil) RenderSlackMarkdownWith
+	// falls through to the legacy glyph/shortcode-text path. Warm-path
+	// emoji flushes land in the same per-message `flushes` named-return
+	// slice the View() loop walks for inline-image attachments.
+	bodyOpts := RenderSlackMarkdownOpts{
+		UserNames:    userNames,
+		ChannelNames: channelNames,
+		PlaceCtx:     m.emojiCtx.PlaceCtx,
+		EmojiCells:   m.emojiCtx.Cells,
+		Customs:      m.emojiCtx.Customs,
+		EmojiFlushes: &flushes,
+	}
+	text := styles.MessageText.Render(WordWrap(RenderSlackMarkdownWith(MessageTextSource(msg), bodyOpts), contentWidth))
 	if stats != nil {
 		stats.bodyTotal += time.Since(bodyT0)
 	}
