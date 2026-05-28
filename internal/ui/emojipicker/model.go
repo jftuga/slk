@@ -48,6 +48,20 @@ func (m *Model) SetEmojiContext(ctx EmojiContext) {
 	m.emojiCtx = ctx
 }
 
+// SetEmojiCustoms updates the customs map without changing PlaceCtx
+// or Cells. Called from compose.SetEmojiCustoms when the workspace's
+// custom emoji list arrives via CustomEmojisLoadedMsg.
+//
+// Mirrors reactionpicker.Model.SetEmojiCustoms — the picker reads
+// m.emojiCtx.Customs at View() time when resolving each row's URL
+// (model.go:185 calls URLForShortcode(name, m.emojiCtx.Customs)).
+// Without this method the dropdown's customs map stayed at its
+// startup-empty value forever, so custom emoji rows fell back to
+// the placeholder glyph rendering.
+func (m *Model) SetEmojiCustoms(customs map[string]string) {
+	m.emojiCtx.Customs = customs
+}
+
 // HandleEmojiImageReady is a no-op hook for shape parity with other
 // surfaces. The dropdown has no render cache.
 func (m *Model) HandleEmojiImageReady(_ string) {}

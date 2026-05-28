@@ -953,6 +953,14 @@ func (m *Model) SetEmojiContext(ctx emojipicker.EmojiContext) {
 	m.emojiPicker.SetEmojiContext(ctx)
 }
 
+// SetEmojiCustoms forwards the workspace customs map to the underlying
+// autocomplete picker so URL lookup at View() time can resolve custom
+// emoji names. Called from App.SetCustomEmoji when CustomEmojisLoadedMsg
+// arrives.
+func (m *Model) SetEmojiCustoms(customs map[string]string) {
+	m.emojiPicker.SetEmojiCustoms(customs)
+}
+
 // IsEmojiActive returns whether the emoji picker is currently showing.
 func (m Model) IsEmojiActive() bool { return m.emojiActive }
 

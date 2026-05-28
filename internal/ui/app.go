@@ -1757,6 +1757,12 @@ func (a *App) SetCustomEmoji(customs map[string]string) {
 	a.messagepane.SetEmojiCustoms(customs)
 	a.threadPanel.SetEmojiCustoms(customs)
 	a.reactionPicker.SetEmojiCustoms(customs)
+	// Compose autocomplete dropdowns (main + thread) also need the
+	// customs map for View()-time URL resolution; without this, custom
+	// emoji rows fall back to the placeholder glyph. See
+	// emojipicker.Model.SetEmojiCustoms for context.
+	a.compose.SetEmojiCustoms(customs)
+	a.threadCompose.SetEmojiCustoms(customs)
 }
 
 // SetInitialChannel sets the active channel and its messages before the TUI starts.
