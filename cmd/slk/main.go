@@ -622,6 +622,26 @@ func run() error {
 	}
 	debuglog.ImgRender("image protocol: %s", proto)
 
+	// Reconcile the emoji-as-images flag with the post-probe protocol.
+	// The pre-probe block in main() (search for emojiwidth.SetImageMode)
+	// turns image mode ON based on env-only detection so the emoji width
+	// probe can be skipped at startup. If the interactive kitty probe
+	// just above downgraded us to halfblock (zellij; tmux with
+	// allow-passthrough=off), image mode must be turned back OFF or:
+	//   - every emoji.Place() call misses the prerender memo (it
+	//     hard-codes ProtoKitty) and falls into a fetch→ready-msg→
+	//     re-render loop that pins the UI thread (see issue #50);
+	//   - every emoji.Width() call runs uniseg grapheme segmentation
+	//     instead of delegating to lipgloss.Width().
+	// Conversely, if we landed on ProtoKitty after the probe AND the
+	// user has emoji_images=on, make sure image mode is on — covers the
+	// case where pre-probe detection was conservative (e.g. preCfg load
+	// failed) but the real detect path succeeded.
+	reconciledImageMode := proto == imgpkg.ProtoKitty && cfg.Appearance.EmojiImages == "on"
+	emojiwidth.SetImageMode(reconciledImageMode, cfg.Appearance.EmojiCells)
+	debuglog.ImgRender("emoji image mode: reconciled=%v (final proto=%s, emoji_images=%q)",
+		reconciledImageMode, proto, cfg.Appearance.EmojiImages)
+
 	// Avatars use kitty graphics when available (sharper). Sixel and
 	// half-block terminals fall back to half-block — re-emitting sixel
 	// per visible avatar per redraw would dominate the bandwidth budget.
