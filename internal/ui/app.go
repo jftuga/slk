@@ -2210,8 +2210,21 @@ func (a *App) View() tea.View {
 		screen = a.lastScreen
 		memoHit = true
 	} else {
-		content := lipgloss.JoinHorizontal(lipgloss.Top, panels...)
-		screen = lipgloss.JoinVertical(lipgloss.Left, content, status)
+		// Composite the side-by-side panels. The panels are uniform-width
+		// and all exactly frame.ContentHeight rows, so a row-wise concat
+		// is byte-identical to lipgloss's JoinHorizontal but skips its
+		// per-line grapheme width measurement (a large share of the
+		// remaining scroll-frame cost at wide sizes). Fall back to lipgloss
+		// if the fast path declines (e.g. a height-clamped pane).
+		content, ok := joinPanelsHorizontal(panels, frame.ContentHeight)
+		if !ok {
+			content = lipgloss.JoinHorizontal(lipgloss.Top, panels...)
+		}
+		// Stack content over status without re-measuring every content
+		// line (lipgloss.JoinVertical's getLines was the other large share
+		// of the composite cost). stackContentStatus reproduces lipgloss's
+		// left-align padding byte-for-byte; see its doc.
+		screen = stackContentStatus(content, status)
 		screen = a.applyOverlays(screen)
 		screen = a.maybeWrapFinalScreen(screen)
 		if canMemo {

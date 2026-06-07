@@ -23,9 +23,95 @@ import (
 	"strings"
 
 	"charm.land/lipgloss/v2"
+	"github.com/charmbracelet/x/ansi"
 
 	"github.com/gammons/slk/internal/ui/styles"
 )
+
+// joinPanelsHorizontal is a zero-measurement replacement for
+// lipgloss.JoinHorizontal(lipgloss.Top, panels...) for the App.View
+// composite. The view's panels (rail, sidebar, messages, thread) are each
+// built to exactly `height` rows of a uniform per-panel width (via
+// exactSize / borderedTopPane), so lipgloss's per-line width measurement
+// and height padding are pure overhead -- the join is just a row-wise
+// concatenation.
+//
+// It returns ok=false (and the caller falls back to lipgloss) if ANY
+// panel does not have exactly `height` rows, which is the only condition
+// under which lipgloss's height-padding would actually differ from a
+// naive concat (e.g. a clamped pane on a very short terminal, or the
+// preview panel). Uniform per-panel line width is guaranteed by the
+// renderers and asserted by TestJoinPanelsHorizontal_MatchesLipgloss.
+func joinPanelsHorizontal(panels []string, height int) (string, bool) {
+	if len(panels) == 0 || height <= 0 {
+		return "", false
+	}
+	cols := make([][]string, len(panels))
+	for i, p := range panels {
+		lines := strings.Split(p, "\n")
+		if len(lines) != height {
+			return "", false
+		}
+		cols[i] = lines
+	}
+	var b strings.Builder
+	for r := 0; r < height; r++ {
+		if r > 0 {
+			b.WriteByte('\n')
+		}
+		for i := range cols {
+			b.WriteString(cols[i][r])
+		}
+	}
+	return b.String(), true
+}
+
+// stackContentStatus is a near-zero-measurement replacement for
+// lipgloss.JoinVertical(lipgloss.Left, content, status) for the two
+// final blocks of App.View. content is the horizontally-joined panel
+// block (uniform line width); status is the single status row. lipgloss
+// left-aligns by padding every line of the narrower block to the wider
+// block's width with plain spaces -- so we measure just one content line
+// (content is uniform) and the status row, then pad with constant runs.
+//
+// This reproduces lipgloss's output byte-for-byte (verified by
+// TestViewComposite_MatchesLipgloss), INCLUDING the case where the status
+// row is wider than the content (a pre-existing statusbar width quirk):
+// lipgloss right-pads the content lines to the status width, and so do we.
+func stackContentStatus(content, status string) string {
+	contentW := 0
+	if nl := strings.IndexByte(content, '\n'); nl >= 0 {
+		contentW = ansi.StringWidth(content[:nl])
+	} else {
+		contentW = ansi.StringWidth(content)
+	}
+	statusW := ansi.StringWidth(status)
+	maxW := contentW
+	if statusW > maxW {
+		maxW = statusW
+	}
+
+	var b strings.Builder
+	if maxW > contentW {
+		pad := strings.Repeat(" ", maxW-contentW)
+		lines := strings.Split(content, "\n")
+		for i, line := range lines {
+			if i > 0 {
+				b.WriteByte('\n')
+			}
+			b.WriteString(line)
+			b.WriteString(pad)
+		}
+	} else {
+		b.WriteString(content)
+	}
+	b.WriteByte('\n')
+	b.WriteString(status)
+	if maxW > statusW {
+		b.WriteString(strings.Repeat(" ", maxW-statusW))
+	}
+	return b.String()
+}
 
 // exactSizeBg forces s to exactly (w, h) cells with bg as the
 // background color. Uses an explicit width parameter instead of
