@@ -378,6 +378,48 @@ var builtinThemes = map[string]struct {
 		Text: "#C5C9C5", TextMuted: "#737C73", Border: "#2D2C29",
 		SidebarBackground: "#282423", RailBackground: "#100E0E",
 	}},
+	"rosé pine dawn": {"Rosé Pine Dawn", ThemeColors{
+		Primary: "#56949F", Accent: "#286983", Warning: "#EA9D34", Error: "#B4637A",
+		Background: "#FAF4ED", Surface: "#FFFAF3", SurfaceDark: "#F2E9E1",
+		Text: "#575279", TextMuted: "#797593", Border: "#DFDAD9",
+		SidebarBackground: "#575279", SidebarText: "#FAF4ED", SidebarTextMuted: "#9893A5",
+		RailBackground: "#423F5C",
+	}},
+	"everforest light": {"Everforest Light", ThemeColors{
+		Primary: "#3A94C5", Accent: "#8DA101", Warning: "#DFA000", Error: "#F85552",
+		Background: "#FDF6E3", Surface: "#F4F0D9", SurfaceDark: "#EFEBD4",
+		Text: "#5C6A72", TextMuted: "#939F91", Border: "#E0DCC7",
+		SidebarBackground: "#343F44", SidebarText: "#D3C6AA", SidebarTextMuted: "#859289",
+		RailBackground: "#232A2E",
+	}},
+	"flexoki light": {"Flexoki Light", ThemeColors{
+		Primary: "#205EA6", Accent: "#66800B", Warning: "#AD8301", Error: "#AF3029",
+		Background: "#FFFCF0", Surface: "#F2F0E5", SurfaceDark: "#E6E4D9",
+		Text: "#100F0F", TextMuted: "#6F6E69", Border: "#DAD8CE",
+		SidebarBackground: "#100F0F", SidebarText: "#CECDC3", SidebarTextMuted: "#878580",
+		RailBackground: "#1C1B1A",
+	}},
+	"modus operandi": {"Modus Operandi", ThemeColors{
+		Primary: "#0031A9", Accent: "#006800", Warning: "#6F5500", Error: "#A60000",
+		Background: "#FFFFFF", Surface: "#F2F2F2", SurfaceDark: "#E5E5E5",
+		Text: "#000000", TextMuted: "#595959", Border: "#D0D0D0",
+		SidebarBackground: "#1E1E1E", SidebarText: "#FFFFFF", SidebarTextMuted: "#989898",
+		RailBackground: "#000000",
+	}},
+	"kanagawa lotus": {"Kanagawa Lotus", ThemeColors{
+		Primary: "#4D699B", Accent: "#6F894E", Warning: "#C4781E", Error: "#C84053",
+		Background: "#F2ECBC", Surface: "#E7DBA0", SurfaceDark: "#DCD5AC",
+		Text: "#545464", TextMuted: "#8A8980", Border: "#DCD5AC",
+		SidebarBackground: "#1F1F28", SidebarText: "#DCD7BA", SidebarTextMuted: "#8A8980",
+		RailBackground: "#16161D",
+	}},
+	"papercolor light": {"PaperColor Light", ThemeColors{
+		Primary: "#0087AF", Accent: "#008700", Warning: "#D75F00", Error: "#AF0000",
+		Background: "#EEEEEE", Surface: "#E4E4E4", SurfaceDark: "#D0D0D0",
+		Text: "#444444", TextMuted: "#878787", Border: "#D0D0D0",
+		SidebarBackground: "#1C1C1C", SidebarText: "#E4E4E4", SidebarTextMuted: "#878787",
+		RailBackground: "#080808",
+	}},
 }
 
 // customThemes stores themes loaded from the user's themes directory.

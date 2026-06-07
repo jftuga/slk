@@ -389,3 +389,43 @@ func TestDarkEditorThemesHaveRequiredColors(t *testing.T) {
 		}
 	}
 }
+
+var lightEditorThemes = []string{
+	"Rosé Pine Dawn", "Everforest Light", "Flexoki Light",
+	"Modus Operandi", "Kanagawa Lotus", "PaperColor Light",
+}
+
+func TestLightEditorThemesRegistered(t *testing.T) {
+	have := map[string]bool{}
+	for _, n := range ThemeNames() {
+		have[n] = true
+	}
+	for _, want := range lightEditorThemes {
+		if !have[want] {
+			t.Errorf("light editor theme %q not registered", want)
+		}
+	}
+}
+
+func TestLightEditorThemesHaveRequiredColors(t *testing.T) {
+	for _, name := range lightEditorThemes {
+		c := lookupTheme(strings.ToLower(name))
+		if c.Primary == "" || c.Accent == "" || c.Warning == "" || c.Error == "" ||
+			c.Background == "" || c.Surface == "" || c.SurfaceDark == "" ||
+			c.Text == "" || c.TextMuted == "" || c.Border == "" {
+			t.Errorf("theme %q missing required color(s): %+v", name, c)
+		}
+	}
+}
+
+func TestLightEditorThemesHaveDarkSidebars(t *testing.T) {
+	for _, name := range lightEditorThemes {
+		c := lookupTheme(strings.ToLower(name))
+		if c.SidebarBackground == "" {
+			t.Errorf("light theme %q must set SidebarBackground", name)
+		}
+		if c.RailBackground == "" {
+			t.Errorf("light theme %q must set RailBackground", name)
+		}
+	}
+}
