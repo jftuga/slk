@@ -50,11 +50,12 @@ var reduceMouse reducerFunc = func(a *App, msg tea.Msg) (tea.Cmd, bool) {
 // reduceMouseWheel handles tea.MouseWheelMsg. Extracted to keep the
 // reduceMouse dispatch switch readable.
 //
-// Wheel notches scroll the viewport of the panel under the cursor
-// WITHOUT changing the current selection -- decoupled from j/k so
-// a user can read past a long message or browse history without
-// losing the selected/active item. Targets the panel under the
-// cursor regardless of which panel currently has keyboard focus.
+// Wheel notches scroll the viewport of the panel under the cursor,
+// regardless of which panel currently has keyboard focus. In the
+// messages pane the selected-message cursor follows the scroll,
+// clamping to the nearest visible message (see viewInternal's
+// cursor-clamp step). The sidebar/threads panels keep their own
+// scroll/selection coupling.
 func reduceMouseWheel(a *App, m tea.MouseWheelMsg) tea.Cmd {
 	if a.bootstrap.IsLoading() {
 		return nil

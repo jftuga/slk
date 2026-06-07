@@ -849,9 +849,10 @@ func (m *Model) MoveUp() {
 	}
 }
 
-// ScrollUp moves the viewport up by n lines without changing the selected
-// message. The selection may scroll off-screen; pressing j/k will snap the
-// viewport back to keep the (new) selection visible.
+// ScrollUp moves the viewport up by n lines. The selected-message cursor
+// follows the scroll: if the scroll would push the selection off the bottom
+// edge, View() clamps the selection to the bottommost still-visible message
+// (see the cursor-clamp step in viewInternal).
 func (m *Model) ScrollUp(n int) {
 	if n <= 0 {
 		return
@@ -867,9 +868,11 @@ func (m *Model) ScrollUp(n int) {
 	m.dirty()
 }
 
-// ScrollDown moves the viewport down by n lines without changing the selected
-// message. View() clamps yOffset to the maximum allowed for the current
-// content height.
+// ScrollDown moves the viewport down by n lines. View() clamps yOffset to the
+// maximum allowed for the current content height, and the selected-message
+// cursor follows the scroll: if the scroll would push the selection off the
+// top edge, View() clamps it to the topmost still-visible message (see the
+// cursor-clamp step in viewInternal).
 func (m *Model) ScrollDown(n int) {
 	if n <= 0 {
 		return
@@ -2800,6 +2803,56 @@ func (m *Model) viewInternal(height, width int, applySelection bool) string {
 	}
 	if m.yOffset > maxOffset {
 		m.yOffset = maxOffset
+	}
+
+	// Clamp the selected-message cursor to the visible viewport so it follows
+	// scrolling. When the user scrolls the viewport (wheel / page keys) far
+	// enough that the selected message leaves the visible window, drag the
+	// selection to the nearest still-visible message instead of letting it
+	// scroll off-screen. This is a no-op when the selection already has at
+	// least one line on-screen, so it runs harmlessly on every render. Date
+	// separators (msgIdx < 0) are never selectable, so they are skipped.
+	visibleTop := m.yOffset
+	visibleBottom := m.yOffset + msgAreaHeight
+	selectionAbove := m.selectedEndLine <= visibleTop
+	selectionBelow := m.selectedStartLine >= visibleBottom
+	if selectionAbove || selectionBelow {
+		newSelected := -1
+		for i, e := range entries {
+			if e.msgIdx < 0 {
+				continue
+			}
+			entryStart := m.entryOffsets[i]
+			entryEnd := entryStart + e.height
+			if entryEnd <= visibleTop || entryStart >= visibleBottom {
+				continue // entry not visible
+			}
+			if selectionAbove {
+				// Topmost visible message: take the first one and stop.
+				newSelected = e.msgIdx
+				break
+			}
+			// selectionBelow: bottommost visible message; keep the last one.
+			newSelected = e.msgIdx
+		}
+		if newSelected >= 0 && newSelected != m.selected {
+			m.selected = newSelected
+			m.snappedSelection = m.selected
+			// Recompute the selected entry's line range so the render loop
+			// below picks the correct selected-variant lines this frame.
+			m.selectedStartLine = 0
+			m.selectedEndLine = 0
+			for i, e := range entries {
+				if e.msgIdx == m.selected {
+					m.selectedStartLine = m.entryOffsets[i]
+					m.selectedEndLine = m.selectedStartLine + e.height
+					if i < len(entries)-1 && e.msgIdx >= 0 {
+						m.selectedEndLine--
+					}
+					break
+				}
+			}
+		}
 	}
 
 	// Build the visible window directly from per-entry pre-split line slices.

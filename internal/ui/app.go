@@ -913,12 +913,12 @@ func (a *App) panelAt(x, y int) (panel Panel, paneX, paneY int, ok bool) {
 	return a.layout.PanelAt(x, y, a.height, a.sidebarVisible, a.threadVisible)
 }
 
-// scrollFocusedPanel scrolls the focused panel by delta lines (negative = up)
-// WITHOUT advancing selection. This is the keyboard equivalent of the mouse
-// wheel: PageUp/PageDown/Ctrl+U/Ctrl+D move the viewport only; the selected
-// message/channel stays put (and may scroll off-screen). The next j/k will
-// snap the viewport back to keep the (still-)selected item visible because
-// hasSnapped == true but snappedSelection != selected once selection moves.
+// scrollFocusedPanel scrolls the focused panel by delta lines (negative = up).
+// This is the keyboard equivalent of the mouse wheel:
+// PageUp/PageDown/Ctrl+U/Ctrl+D move the viewport. In the messages pane the
+// selected-message cursor follows the scroll, clamping to the nearest visible
+// message so it never scrolls off-screen (see viewInternal's cursor-clamp
+// step). The sidebar/threads panels keep their own scroll/selection coupling.
 //
 // On a scroll-up that lands the messages-pane viewport at the very top, this
 // also triggers a fetch of older channel history -- the same UX the

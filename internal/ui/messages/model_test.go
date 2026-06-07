@@ -154,17 +154,109 @@ func TestScrollPreservedAcrossRenders(t *testing.T) {
 		t.Fatalf("ScrollUp did not decrease yOffset: before=%d after=%d", startOffset, scrolled)
 	}
 
-	// Render again WITHOUT changing selection. yOffset must NOT snap back.
+	// Render again. The viewport scroll position (yOffset) must NOT snap back.
+	// The cursor follows the scroll and clamps to the bottommost visible
+	// message, but the scroll position itself is preserved.
 	_ = m.View(20, 80)
 	if m.yOffset != scrolled {
 		t.Errorf("yOffset snapped back after render: want %d, got %d", scrolled, m.yOffset)
 	}
 
-	// Now move selection -- yOffset should re-snap to keep selection visible.
-	m.MoveUp()
+	// Moving selection DOWN past the bottom edge of the (scrolled) viewport
+	// should re-snap the viewport down to keep the new selection visible.
+	m.MoveDown()
 	_ = m.View(20, 80)
-	if m.yOffset == scrolled {
-		t.Error("expected yOffset to re-snap after selection change, but it did not")
+	if m.yOffset <= scrolled {
+		t.Errorf("expected yOffset to re-snap down after moving selection below the fold: scrolled=%d got=%d", scrolled, m.yOffset)
+	}
+}
+
+// selectionVisible reports whether the currently selected message's line range
+// (as computed by the most recent View()) has at least one line inside the
+// visible viewport window.
+func selectionVisible(m *Model) bool {
+	top := m.yOffset
+	bottom := m.yOffset + m.lastViewHeight
+	return m.selectedStartLine < bottom && m.selectedEndLine > top
+}
+
+// TestCursorFollowsScrollUp asserts that scrolling the viewport up far enough
+// to push the selected message off the bottom edge drags the cursor with it,
+// clamping selection to the bottommost still-visible message.
+func TestCursorFollowsScrollUp(t *testing.T) {
+	msgs := make([]MessageItem, 60)
+	for i := range msgs {
+		msgs[i] = MessageItem{TS: "1.0", UserName: "alice", Text: "msg body", Timestamp: "10:00 AM"}
+	}
+	m := New(msgs, "general")
+	_ = m.View(20, 80)
+	startSel := m.SelectedIndex() // bottom
+	if startSel != len(msgs)-1 {
+		t.Fatalf("setup: expected selection at bottom %d, got %d", len(msgs)-1, startSel)
+	}
+
+	m.ScrollUp(10)
+	_ = m.View(20, 80)
+
+	if m.SelectedIndex() >= startSel {
+		t.Errorf("cursor did not follow scroll up: before=%d after=%d", startSel, m.SelectedIndex())
+	}
+	if !selectionVisible(&m) {
+		t.Errorf("selection not visible after scroll up: sel=[%d,%d) window=[%d,%d)",
+			m.selectedStartLine, m.selectedEndLine, m.yOffset, m.yOffset+m.lastViewHeight)
+	}
+}
+
+// TestCursorFollowsScrollDown asserts that scrolling the viewport down far
+// enough to push the selected message off the top edge drags the cursor with
+// it, clamping selection to the topmost still-visible message.
+func TestCursorFollowsScrollDown(t *testing.T) {
+	msgs := make([]MessageItem, 60)
+	for i := range msgs {
+		msgs[i] = MessageItem{TS: "1.0", UserName: "alice", Text: "msg body", Timestamp: "10:00 AM"}
+	}
+	m := New(msgs, "general")
+	m.GoToTop()
+	_ = m.View(20, 80)
+	startSel := m.SelectedIndex() // top
+	if startSel != 0 {
+		t.Fatalf("setup: expected selection at top 0, got %d", startSel)
+	}
+
+	m.ScrollDown(20)
+	_ = m.View(20, 80)
+
+	if m.SelectedIndex() <= startSel {
+		t.Errorf("cursor did not follow scroll down: before=%d after=%d", startSel, m.SelectedIndex())
+	}
+	if !selectionVisible(&m) {
+		t.Errorf("selection not visible after scroll down: sel=[%d,%d) window=[%d,%d)",
+			m.selectedStartLine, m.selectedEndLine, m.yOffset, m.yOffset+m.lastViewHeight)
+	}
+}
+
+// TestCursorUnchangedWhenScrollKeepsSelectionVisible asserts that a small
+// scroll that leaves the selected message on-screen does not move the cursor.
+func TestCursorUnchangedWhenScrollKeepsSelectionVisible(t *testing.T) {
+	msgs := make([]MessageItem, 60)
+	for i := range msgs {
+		msgs[i] = MessageItem{TS: "1.0", UserName: "alice", Text: "msg body", Timestamp: "10:00 AM"}
+	}
+	m := New(msgs, "general")
+	_ = m.View(20, 80)
+	startSel := m.SelectedIndex()
+
+	// Scroll up by a single line; the selected (bottom) message should still
+	// have lines on-screen, so the cursor must not move.
+	m.ScrollUp(1)
+	_ = m.View(20, 80)
+
+	if m.SelectedIndex() != startSel {
+		t.Errorf("cursor moved on a scroll that kept selection visible: before=%d after=%d",
+			startSel, m.SelectedIndex())
+	}
+	if !selectionVisible(&m) {
+		t.Errorf("selection unexpectedly off-screen after 1-line scroll")
 	}
 }
 
