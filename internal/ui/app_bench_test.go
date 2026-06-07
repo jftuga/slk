@@ -77,6 +77,92 @@ func BenchmarkAppViewIdle(b *testing.B) {
 	}
 }
 
+// makeWideScrollApp builds a NORMAL-mode app at an ultrawide terminal size
+// (477x130, matching a real user's session in slk-debug.log) with focus on
+// the messages pane -- the j/k scroll hot path. This is the case the
+// compositor memo does NOT help: every scroll bumps messagepane.Version, so
+// the bordered top region re-renders and the screen re-composites.
+func makeWideScrollApp() *App {
+	a := NewApp()
+	_, _ = a.Update(tea.WindowSizeMsg{Width: 477, Height: 130})
+
+	channels := make([]sidebar.ChannelItem, 100)
+	for i := range channels {
+		channels[i] = sidebar.ChannelItem{
+			ID:   fmt.Sprintf("C%d", i),
+			Name: fmt.Sprintf("channel-%d", i),
+			Type: "channel",
+		}
+	}
+	a.sidebar.SetItems(channels)
+
+	msgs := make([]messages.MessageItem, 200)
+	for i := range msgs {
+		msgs[i] = messages.MessageItem{
+			TS:        fmt.Sprintf("%d.0", 1700000000+i),
+			UserName:  "alice",
+			UserID:    "U1",
+			Text:      "Hello world this is a moderately long message with **bold** and _italic_ formatting.",
+			Timestamp: "10:30 AM",
+		}
+	}
+	a.messagepane.SetMessages(msgs)
+	a.activeChannelID = "C1"
+	a.activeTeamID = "T1"
+	a.focusedPanel = PanelMessages
+	a.SetMode(ModeNormal)
+
+	_ = a.View() // prime caches
+	return a
+}
+
+// BenchmarkAppViewScroll measures the raw cost of a render that follows an
+// actual selection change (the memo=false path): move the selection one
+// row directly, then render. This is the irreducible per-changed-frame
+// cost at ultrawide sizes.
+func BenchmarkAppViewScroll(b *testing.B) {
+	a := makeWideScrollApp()
+
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		if i%2 == 0 {
+			a.messagepane.MoveDown()
+		} else {
+			a.messagepane.MoveUp()
+		}
+		_ = a.View()
+	}
+}
+
+// BenchmarkAppViewScrollHeldKey simulates a fast key-repeat through the
+// real Update->View path WITH coalescing: a burst of `down` keypresses
+// punctuated by a flush tick every `flushEvery` events (the ~16ms cadence
+// the event loop delivers scrollFlushMsg at). This is the user's "holding
+// j" path. With coalescing, the non-first keypresses in each burst are
+// Stage A memo hits, so the average per-event cost collapses -- which is
+// what stops a held key from building a render backlog.
+func BenchmarkAppViewScrollHeldKey(b *testing.B) {
+	a := makeWideScrollApp()
+	up := tea.KeyPressMsg{Code: tea.KeyUp} // k: genuine upward movement from the bottom
+
+	// Roughly: a 200Hz key-repeat against a 16ms flush cadence yields
+	// ~3 keypresses per flush. Model that ratio.
+	const flushEvery = 3
+
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		if a.messagepane.SelectedIndex() == 0 {
+			a.messagepane.GoToBottom() // wrap so moves never stall at the top
+		}
+		_, _ = a.Update(up)
+		_ = a.View()
+		if i%flushEvery == flushEvery-1 {
+			_, _ = a.Update(scrollFlushMsg{})
+			_ = a.View()
+		}
+	}
+}
+
 // TestComposeKeystrokeKeepsSidePanelsCached verifies that typing a single
 // character into the compose box does NOT bump the version counters of the
 // sidebar / messages / workspace rail panels. Without this guarantee, the

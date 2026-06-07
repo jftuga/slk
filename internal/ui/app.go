@@ -308,6 +308,47 @@ type App struct {
 	// (overlay + the channel/ts/attIdx triple that lets h/l/arrow
 	// cycling locate sibling attachments). See internal/ui/imagepreview.go.
 	preview *imagePreviewController
+
+	// Compositor memo (Stage A perf). bubbletea v2 calls View() after
+	// EVERY message -- every keystroke, key-repeat, mouse-motion, and
+	// tick -- synchronously in the event loop (tea.go render-on-update).
+	// The 60fps cap only throttles the terminal flush, not View(). So
+	// the final JoinHorizontal/JoinVertical compositing (~3.6ms on a
+	// large screen) otherwise re-runs even when every cached panel is
+	// byte-identical to the previous frame (the dominant cost during a
+	// >100Hz mouse-motion drag-select, where selection extension is
+	// already coalesced to 60Hz but View() still fires per raw event).
+	//
+	// When no overlay/preview is active and the panel strings + status
+	// row match the last frame, View() reuses lastScreen and skips the
+	// re-join entirely. lastPanels holds references to the (immutable,
+	// mostly cache-shared) per-panel strings from the previous frame;
+	// equality against the freshly-rendered panels is O(1) per panel on
+	// a cache hit because the strings share a backing array.
+	lastScreen      string
+	lastPanels      []string
+	lastStatus      string
+	lastScreenW     int
+	lastScreenH     int
+	lastScreenValid bool
+
+	// Held-key scroll coalescing (Stage C perf). bubbletea v2 runs
+	// View() after every message, and each j/k selection move bumps the
+	// messages/thread pane Version -> the Stage A compositor memo misses
+	// -> a full (~17-40ms at ultrawide sizes) render. A fast key-repeat
+	// then queues keypresses faster than they render, so a held key
+	// builds a backlog that keeps scrolling after release.
+	//
+	// Coalescing applies the FIRST move in a burst immediately (instant
+	// single-tap feedback) and accumulates subsequent moves into
+	// scrollPending without bumping any Version -- so those frames are
+	// cheap Stage A memo hits and the input queue drains. A single
+	// scrollFlushMsg tick applies the accumulated batch. scrollPanel
+	// records which pane the pending moves target (focus cannot change
+	// mid-burst without a non-Up/Down key, which force-flushes first).
+	scrollPending        int
+	scrollPanel          Panel
+	scrollFlushScheduled bool
 }
 
 func NewApp() *App {
@@ -469,6 +510,12 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		a.height = msg.Height
 		return a, nil
 
+	case scrollFlushMsg:
+		if cmd := a.applyScrollFlush(); cmd != nil {
+			cmds = append(cmds, cmd)
+		}
+		return a, tea.Batch(cmds...)
+
 	case tea.KeyMsg:
 		cmd := a.handleKey(msg)
 		if cmd != nil {
@@ -501,10 +548,23 @@ func (a *App) handleKey(msg tea.KeyMsg) tea.Cmd {
 		return nil
 	}
 
+	// Held-key scroll coalescing guard: any key other than j/k (Up/Down)
+	// must act on the up-to-date selection, so drain accumulated scroll
+	// moves before dispatching it. Up/Down themselves feed the coalescer
+	// (see coalesceContentScroll) and must not flush.
+	var pre tea.Cmd
+	if a.scrollPending != 0 && !key.Matches(msg, a.keys.Down) && !key.Matches(msg, a.keys.Up) {
+		pre = a.flushScrollCoalesce()
+	}
+
 	// Mode-specific handling. Dispatch table lives in
 	// mode_handlers.go; unmapped modes fall back to Normal
 	// (mirrors the pre-Phase-5 `default:` arm).
-	return dispatchModeKey(a, msg)
+	cmd := dispatchModeKey(a, msg)
+	if pre != nil {
+		return tea.Batch(pre, cmd)
+	}
+	return cmd
 }
 
 // navigateBack walks the per-workspace history stack one step
@@ -828,6 +888,22 @@ func sanitizeForFilename(s string) string {
 	return result
 }
 
+// scrollFlushInterval is the coalescing window for held j/k selection
+// moves. 16ms (~60Hz) is short enough that batched moves still feel
+// continuous, long enough to collapse a fast key-repeat burst into one
+// render per tick. See the scrollPending field doc on App.
+const scrollFlushInterval = 16 * time.Millisecond
+
+// scrollFlushMsg drains accumulated held-key scroll moves. Scheduled by
+// coalesceContentScroll (at most one in flight via scrollFlushScheduled).
+type scrollFlushMsg struct{}
+
+func scrollFlushTickCmd() tea.Cmd {
+	return tea.Tick(scrollFlushInterval, func(time.Time) tea.Msg {
+		return scrollFlushMsg{}
+	})
+}
+
 func (a *App) handleDown() tea.Cmd {
 	switch a.focusedPanel {
 	case PanelSidebar:
@@ -839,9 +915,9 @@ func (a *App) handleDown() tea.Cmd {
 			// don't fire one conversations.replies call per row.
 			return a.openSelectedThreadCmd(true)
 		}
-		a.messagepane.MoveDown()
+		return a.coalesceContentScroll(+1)
 	case PanelThread:
-		a.threadPanel.MoveDown()
+		return a.coalesceContentScroll(+1)
 	}
 	return nil
 }
@@ -856,17 +932,104 @@ func (a *App) handleUp() tea.Cmd {
 			// k: same debounce as j — see handleDown.
 			return a.openSelectedThreadCmd(true)
 		}
-		a.messagepane.MoveUp()
-		// If selection reached the top, fetch older messages. The
-		// viewport-based path (wheel / PageUp) is handled by
-		// scrollFocusedPanel via the same helper.
-		if cmd := a.maybeFetchOlderHistory(a.messagepane.AtTop()); cmd != nil {
-			return cmd
-		}
+		return a.coalesceContentScroll(-1)
 	case PanelThread:
-		a.threadPanel.MoveUp()
+		return a.coalesceContentScroll(-1)
 	}
 	return nil
+}
+
+// coalesceContentScroll batches a j/k selection move (delta +1 = down,
+// -1 = up) on a tall content pane (channel messages or thread). The
+// first move in a burst applies immediately for instant feedback and
+// arms the flush tick; subsequent moves within the window only
+// accumulate scrollPending (no Version bump -> Stage A memo hit), so a
+// held key cannot outpace rendering. See the scrollPending field doc.
+func (a *App) coalesceContentScroll(delta int) tea.Cmd {
+	if !a.scrollFlushScheduled {
+		a.scrollFlushScheduled = true
+		a.scrollPanel = a.focusedPanel
+		cmd := a.applyScrollMove(a.focusedPanel, delta)
+		return tea.Batch(cmd, scrollFlushTickCmd())
+	}
+	// Focus cannot change mid-burst without a non-Up/Down key, which
+	// force-flushes pending first (see handleKey); so scrollPanel stays
+	// valid. Guard defensively anyway: a focus mismatch flushes and
+	// restarts on the current pane.
+	if a.focusedPanel != a.scrollPanel {
+		flush := a.flushScrollCoalesce()
+		a.scrollPanel = a.focusedPanel
+		return tea.Batch(flush, a.applyScrollMove(a.focusedPanel, delta))
+	}
+	a.scrollPending += delta
+	return nil
+}
+
+// applyScrollMove applies |delta| MoveUp/MoveDown steps to the given
+// content pane and returns any follow-up cmd (older-history backfill
+// when an up-scroll lands the channel pane at the top). delta>0 = down.
+func (a *App) applyScrollMove(panel Panel, delta int) tea.Cmd {
+	if delta == 0 {
+		return nil
+	}
+	switch panel {
+	case PanelMessages:
+		if delta > 0 {
+			for i := 0; i < delta; i++ {
+				a.messagepane.MoveDown()
+			}
+			return nil
+		}
+		for i := 0; i < -delta; i++ {
+			a.messagepane.MoveUp()
+		}
+		// Selection reached the top: backfill older history (same UX
+		// as the pre-coalescing path and the wheel/PageUp route).
+		return a.maybeFetchOlderHistory(a.messagepane.AtTop())
+	case PanelThread:
+		if delta > 0 {
+			for i := 0; i < delta; i++ {
+				a.threadPanel.MoveDown()
+			}
+		} else {
+			for i := 0; i < -delta; i++ {
+				a.threadPanel.MoveUp()
+			}
+		}
+	}
+	return nil
+}
+
+// applyScrollFlush drains the accumulated held-key scroll batch. Invoked
+// from the scrollFlushMsg tick. While moves keep arriving it applies the
+// batch and RESCHEDULES itself (keeping scrollFlushScheduled true) so the
+// expensive render stays paced at the flush cadence rather than firing
+// once per keypress. When a tick finds nothing pending, the held
+// sequence has ended: clear the scheduled flag so the next fresh tap is
+// applied immediately again.
+func (a *App) applyScrollFlush() tea.Cmd {
+	n := a.scrollPending
+	a.scrollPending = 0
+	if n == 0 {
+		a.scrollFlushScheduled = false
+		return nil
+	}
+	cmd := a.applyScrollMove(a.scrollPanel, n)
+	return tea.Batch(cmd, scrollFlushTickCmd())
+}
+
+// flushScrollCoalesce applies any pending (not-yet-rendered) scroll moves
+// immediately so that a subsequent selection-reading action (Enter,
+// reaction, click, etc.) sees the correct selected message. Does not
+// touch scrollFlushScheduled: a tick already in flight harmlessly
+// no-ops when it finds scrollPending == 0.
+func (a *App) flushScrollCoalesce() tea.Cmd {
+	if a.scrollPending == 0 {
+		return nil
+	}
+	n := a.scrollPending
+	a.scrollPending = 0
+	return a.applyScrollMove(a.scrollPanel, n)
 }
 
 func (a *App) handleGoToBottom() tea.Cmd {
@@ -2031,23 +2194,87 @@ func (a *App) View() tea.View {
 		panels = append(panels, a.renderPreviewPanel(frame))
 	}
 
-	content := lipgloss.JoinHorizontal(lipgloss.Top, panels...)
 	status := a.renderStatusRow(frame.RailWidth, a.width-frame.RailWidth, themeVer)
-	screen := lipgloss.JoinVertical(lipgloss.Left, content, status)
-	screen = a.applyOverlays(screen)
-	v := tea.NewView(a.maybeWrapFinalScreen(screen))
+
+	// Compositor memo (Stage A). Skip the JoinHorizontal/JoinVertical
+	// re-composite when no overlay/preview is active and the panel
+	// inputs are unchanged from the last frame. See the lastScreen
+	// field doc on App for why this matters (View() runs per message).
+	// Overlay/preview frames are never memoized: overlay content can
+	// change without bumping any base-panel version, and the preview
+	// panel is rendered fresh (uncached) each frame.
+	canMemo := !previewActive && !a.overlayActive()
+	var screen string
+	memoHit := false
+	if canMemo && a.screenMemoMatches(panels, status, a.width, a.height) {
+		screen = a.lastScreen
+		memoHit = true
+	} else {
+		content := lipgloss.JoinHorizontal(lipgloss.Top, panels...)
+		screen = lipgloss.JoinVertical(lipgloss.Left, content, status)
+		screen = a.applyOverlays(screen)
+		screen = a.maybeWrapFinalScreen(screen)
+		if canMemo {
+			a.storeScreenMemo(panels, status, a.width, a.height, screen)
+		} else {
+			// Overlay/preview output is not memoizable; force the next
+			// memoizable frame to recompute.
+			a.lastScreenValid = false
+		}
+	}
+
+	v := tea.NewView(screen)
 	v.AltScreen = true
 	v.MouseMode = tea.MouseModeCellMotion
 	v.WindowTitle = a.windowTitle
 	if debuglog.Enabled() {
 		// panel: 0=workspace 1=sidebar 2=messages 3=thread
 		// view:  0=channels 1=threads
-		debuglog.Perf("App.View total=%s w=%d h=%d panel=%d view=%d mode=%s thread=%v sidebar=%v preview=%v",
-			time.Since(viewPerfStart), a.width, a.height,
+		debuglog.Perf("App.View total=%s memo=%v w=%d h=%d panel=%d view=%d mode=%s thread=%v sidebar=%v preview=%v",
+			time.Since(viewPerfStart), memoHit, a.width, a.height,
 			int(a.focusedPanel), int(a.view), a.mode.String(),
 			a.threadVisible, a.sidebarVisible, previewActive)
 	}
 	return v
+}
+
+// screenMemoMatches reports whether the freshly-rendered panel strings
+// and status row are identical to those that produced a.lastScreen, so
+// the previously composited screen can be reused without re-joining.
+// On an all-cache-hit frame the panel strings share a backing array
+// with the stored ones, so each comparison short-circuits in O(1).
+func (a *App) screenMemoMatches(panels []string, status string, w, h int) bool {
+	if !a.lastScreenValid || a.lastScreenW != w || a.lastScreenH != h {
+		return false
+	}
+	if a.lastStatus != status || len(panels) != len(a.lastPanels) {
+		return false
+	}
+	for i := range panels {
+		if panels[i] != a.lastPanels[i] {
+			return false
+		}
+	}
+	return true
+}
+
+// storeScreenMemo records the inputs and output of a successful
+// (non-overlay, non-preview) composite for reuse by the next frame.
+// Panel strings are immutable and mostly cache-shared, so we retain
+// references rather than copying their contents; only the slice header
+// is copied (the caller reuses its backing array across frames).
+func (a *App) storeScreenMemo(panels []string, status string, w, h int, screen string) {
+	if cap(a.lastPanels) >= len(panels) {
+		a.lastPanels = a.lastPanels[:len(panels)]
+	} else {
+		a.lastPanels = make([]string, len(panels))
+	}
+	copy(a.lastPanels, panels)
+	a.lastStatus = status
+	a.lastScreen = screen
+	a.lastScreenW = w
+	a.lastScreenH = h
+	a.lastScreenValid = true
 }
 
 // cancelEdit exits edit mode, restoring the stashed draft to its

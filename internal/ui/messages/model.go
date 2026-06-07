@@ -1387,6 +1387,12 @@ func (m *Model) buildCacheStyles(width int) cacheStyles {
 	spacerBg := lipgloss.NewStyle().Background(styles.Background)
 	m.cacheSpacer = spacerBg.Width(width).Render("")
 	hintStyle := lipgloss.NewStyle().Background(styles.Background).Foreground(styles.TextMuted)
+	// NOTE: intentionally NOT width-padded. "more below" only appears when
+	// the content overflows the viewport, which is exactly the condition
+	// under which scrollbar.Overlay runs and normalizes every row to the
+	// full width -- so the app-layer border-assembly width invariant
+	// (ui.borderedTopPane) still holds. Padding here would be truncated by
+	// the scrollbar pass and break TestSelection_HighlightDoesNotCorrupt...
 	m.cacheMoreBelow = hintStyle.Render("  -- more below --")
 	return cacheStyles{
 		borderFill:   borderFill,
@@ -1403,8 +1409,11 @@ func (m *Model) buildCacheStyles(width int) cacheStyles {
 // accepted for symmetry with other render helpers but is unused: the
 // hint is left-aligned and the host code (View()) drops it into a
 // pre-sized visible[0] slot.
-func (m *Model) renderLoadingOlderHint(_ int) string {
-	hintStyle := lipgloss.NewStyle().Background(styles.Background).Foreground(styles.TextMuted)
+func (m *Model) renderLoadingOlderHint(width int) string {
+	// Width(width) pads to the full pane width so this transient top-row
+	// hint upholds the "every pane line is exactly width cells" invariant
+	// the app-layer border assembly relies on (ui.borderedTopPane).
+	hintStyle := lipgloss.NewStyle().Background(styles.Background).Foreground(styles.TextMuted).Width(width)
 	frame := styles.SpinnerChars[m.spinnerFrame%len(styles.SpinnerChars)]
 	return hintStyle.Render("  " + string(frame) + " Loading older messages...")
 }
@@ -2677,7 +2686,13 @@ func (m *Model) viewInternal(height, width int, applySelection bool) string {
 			Padding(0, 1)
 		header := headerStyle.Render(fmt.Sprintf("%s %s", channelGlyph(m.channelType), m.channelName))
 		if m.channelTopic != "" {
-			header += "\n" + styles.Timestamp.Render(WordWrap(m.channelTopic, width))
+			// Width(width) pads every wrapped topic line to the full pane
+			// width. This keeps the invariant that EVERY chrome line is
+			// exactly `width` display cells, which lets the app layer
+			// assemble the pane border by concatenation (no per-frame
+			// grapheme re-measurement). See ui.borderedTopPane.
+			topicStyle := styles.Timestamp.Width(width).Background(styles.Background)
+			header += "\n" + topicStyle.Render(WordWrap(m.channelTopic, width))
 		}
 		m.chromeCache = header
 		m.chromeHeight = lipgloss.Height(m.chromeCache)

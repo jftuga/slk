@@ -60,6 +60,9 @@ func reduceMouseWheel(a *App, m tea.MouseWheelMsg) tea.Cmd {
 	if a.bootstrap.IsLoading() {
 		return nil
 	}
+	// Drain any pending held-key scroll so the wheel scroll applies on
+	// top of the up-to-date viewport/selection (see coalesceContentScroll).
+	a.flushScrollCoalesce()
 	var up bool
 	switch m.Button {
 	case tea.MouseWheelUp:
@@ -132,6 +135,11 @@ func reduceMouseClick(a *App, m tea.MouseClickMsg) tea.Cmd {
 	if m.Button != tea.MouseLeft {
 		return nil
 	}
+	// A click sets the selection absolutely (ClickAt below), so any
+	// pending held-key scroll moves would be immediately overwritten --
+	// discard them rather than apply (and let any in-flight flush tick
+	// no-op). Prevents a post-click selection jump when the tick fires.
+	a.scrollPending = 0
 	x := m.X
 	statusHeight := 1
 	if m.Y >= a.height-statusHeight {

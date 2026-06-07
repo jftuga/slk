@@ -223,20 +223,23 @@ func (a *App) renderMessagesTop(msgWidth, msgBorder, topHeight, msgContentHeight
 	if c.hit(topPanelVersion, msgWidth, topHeight, topLayoutKey) {
 		return c.output
 	}
-	topBorderStyle := styles.UnfocusedBorder.Width(msgWidth).
-		BorderTop(true).BorderLeft(true).BorderRight(true).BorderBottom(false)
-	if msgFocused {
-		topBorderStyle = styles.FocusedBorder.Width(msgWidth).
-			BorderTop(true).BorderLeft(true).BorderRight(true).BorderBottom(false)
-	}
 	// ViewBare (not View) so the cached output is selection-free; the
 	// caller composes ApplySelectionToBordered on top of the cache return,
 	// keeping the bordered re-render off the mouse-drag hot path.
+	//
+	// PERF: every line of msgView is built to exactly msgWidth-2 display
+	// cells (the messages model pads chrome, per-entry lines, spacer,
+	// scroll indicators, and the loading hint), so we assemble the pane
+	// border by concatenation rather than letting lipgloss re-measure all
+	// ~N visible lines grapheme-by-grapheme every frame -- the dominant
+	// scroll-frame cost on a wide terminal. borderedTopPane is gated by
+	// TestBorderedTopPane_MatchesLipgloss for visual equivalence with the
+	// old `padPaneToSize(borderStyle.Render(msgView), ...)` path.
 	msgView := a.messagepane.ViewBare(msgContentHeight, msgWidth-2)
 	msgView = messages.ReapplyBgAfterResets(msgView, messages.BgANSI())
-	out := exactSize(
-		topBorderStyle.Render(msgView),
-		msgWidth+msgBorder, topHeight,
+	out := borderedTopPane(
+		msgView,
+		msgWidth-2, msgWidth+msgBorder, topHeight, msgFocused, styles.Background,
 	)
 	c.store(out, topPanelVersion, msgWidth, topHeight, topLayoutKey)
 	return out
