@@ -1,8 +1,10 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 )
@@ -13,7 +15,12 @@ import (
 // TOML re-marshal).
 func saveGlobalWidth(configPath string, width int) error {
 	data, err := os.ReadFile(configPath)
-	if err != nil {
+	if errors.Is(err, os.ErrNotExist) {
+		if err := os.MkdirAll(filepath.Dir(configPath), 0755); err != nil {
+			return err
+		}
+		data = nil
+	} else if err != nil {
 		return err
 	}
 	lines := strings.Split(string(data), "\n")
@@ -53,7 +60,12 @@ func saveGlobalWidth(configPath string, width int) error {
 // [workspaces.<tomlKey>]. Mirrors saveWorkspaceTheme.
 func saveWorkspaceWidth(configPath, tomlKey, teamID, teamName string, width int) error {
 	data, err := os.ReadFile(configPath)
-	if err != nil {
+	if errors.Is(err, os.ErrNotExist) {
+		if err := os.MkdirAll(filepath.Dir(configPath), 0755); err != nil {
+			return err
+		}
+		data = nil
+	} else if err != nil {
 		return err
 	}
 	lines := strings.Split(string(data), "\n")

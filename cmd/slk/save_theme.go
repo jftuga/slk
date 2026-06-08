@@ -1,8 +1,10 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 )
 
@@ -57,7 +59,12 @@ func sanitizeComment(s string) string {
 // TOML re-marshal).
 func saveGlobalTheme(configPath, themeName string) error {
 	data, err := os.ReadFile(configPath)
-	if err != nil {
+	if errors.Is(err, os.ErrNotExist) {
+		if err := os.MkdirAll(filepath.Dir(configPath), 0755); err != nil {
+			return err
+		}
+		data = nil
+	} else if err != nil {
 		return err
 	}
 	lines := strings.Split(string(data), "\n")
@@ -95,7 +102,12 @@ func saveGlobalTheme(configPath, themeName string) error {
 // slug callers update an existing block).
 func saveWorkspaceTheme(configPath, tomlKey, teamID, teamName, themeName string) error {
 	data, err := os.ReadFile(configPath)
-	if err != nil {
+	if errors.Is(err, os.ErrNotExist) {
+		if err := os.MkdirAll(filepath.Dir(configPath), 0755); err != nil {
+			return err
+		}
+		data = nil
+	} else if err != nil {
 		return err
 	}
 	lines := strings.Split(string(data), "\n")
