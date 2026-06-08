@@ -2167,6 +2167,7 @@ func fetchOlderMessages(client *slackclient.Client, channelID, latestTS string, 
 				Emoji:      r.Name,
 				Count:      r.Count,
 				HasReacted: hasReacted,
+				UserIDs:    r.Users,
 			})
 			_ = db.UpsertReaction(m.Timestamp, channelID, r.Name, r.Users, r.Count)
 		}
@@ -2423,6 +2424,7 @@ func enrichCachedRow(
 				Emoji:      r.Emoji,
 				Count:      r.Count,
 				HasReacted: hasReacted,
+				UserIDs:    r.UserIDs,
 			})
 		}
 	} else {
@@ -2578,6 +2580,7 @@ func fetchChannelMessages(client *slackclient.Client, channelID string, db *cach
 				Emoji:      r.Name,
 				Count:      r.Count,
 				HasReacted: hasReacted,
+				UserIDs:    r.Users,
 			})
 			_ = db.UpsertReaction(m.Timestamp, channelID, r.Name, r.Users, r.Count)
 		}
@@ -2669,6 +2672,7 @@ func fetchThreadReplies(client *slackclient.Client, channelID, threadTS string, 
 				Emoji:      r.Name,
 				Count:      r.Count,
 				HasReacted: hasReacted,
+				UserIDs:    r.Users,
 			})
 			_ = db.UpsertReaction(m.Timestamp, channelID, r.Name, r.Users, r.Count)
 		}
