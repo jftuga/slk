@@ -9,53 +9,6 @@ import (
 	"strings"
 )
 
-// saveGlobalWidth rewrites the [sidebar] width line in config.toml.
-// If the file has no width line under [sidebar], it appends one.
-// Existing comments and ordering are preserved (textual rewrite, not
-// TOML re-marshal).
-func saveGlobalWidth(configPath string, width int) error {
-	data, err := os.ReadFile(configPath)
-	if errors.Is(err, os.ErrNotExist) {
-		if err := os.MkdirAll(filepath.Dir(configPath), 0755); err != nil {
-			return err
-		}
-		data = nil
-	} else if err != nil {
-		return err
-	}
-	lines := strings.Split(string(data), "\n")
-
-	inSidebar := false
-	for i, line := range lines {
-		trimmed := strings.TrimSpace(line)
-		if strings.HasPrefix(trimmed, "[") && strings.HasSuffix(trimmed, "]") {
-			inSidebar = trimmed == "[sidebar]"
-			continue
-		}
-		if !inSidebar {
-			continue
-		}
-		if strings.HasPrefix(trimmed, "width") && strings.Contains(trimmed, "=") {
-			lines[i] = "width = " + strconv.Itoa(width)
-			return os.WriteFile(configPath, []byte(strings.Join(lines, "\n")), 0644)
-		}
-	}
-	// No [sidebar] width line found — append or insert.
-	// If [sidebar] exists, insert width after the header.
-	for i, line := range lines {
-		if strings.TrimSpace(line) == "[sidebar]" {
-			newLines := make([]string, 0, len(lines)+1)
-			newLines = append(newLines, lines[:i+1]...)
-			newLines = append(newLines, "width = "+strconv.Itoa(width))
-			newLines = append(newLines, lines[i+1:]...)
-			return os.WriteFile(configPath, []byte(strings.Join(newLines, "\n")), 0644)
-		}
-	}
-	// No [sidebar] section at all — append a new one.
-	lines = append(lines, "", "[sidebar]", "width = "+strconv.Itoa(width))
-	return os.WriteFile(configPath, []byte(strings.Join(lines, "\n")), 0644)
-}
-
 // saveWorkspaceWidth rewrites or appends a sidebar_width entry in
 // [workspaces.<tomlKey>]. Mirrors saveWorkspaceTheme.
 func saveWorkspaceWidth(configPath, tomlKey, teamID, teamName string, width int) error {
