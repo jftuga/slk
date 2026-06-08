@@ -825,6 +825,34 @@ func run() error {
 		}
 	})
 
+	// Wire sidebar width saver: always persist to the active workspace.
+	app.SetWidthSaver(func(width int) {
+		if activeTeamID == "" {
+			return
+		}
+		teamName := activeTeamID
+		if wctx, ok := workspaces[activeTeamID]; ok && wctx.TeamName != "" {
+			teamName = wctx.TeamName
+		}
+		tomlKey := activeTeamID
+		for k, w := range cfg.Workspaces {
+			if w.TeamID == activeTeamID {
+				tomlKey = k
+				break
+			}
+		}
+		if cfg.Workspaces == nil {
+			cfg.Workspaces = make(map[string]config.Workspace)
+		}
+		ws := cfg.Workspaces[tomlKey]
+		ws.TeamID = activeTeamID
+		ws.SidebarWidth = width
+		cfg.Workspaces[tomlKey] = ws
+		if err := saveWorkspaceWidth(configPath, tomlKey, activeTeamID, teamName, width); err != nil {
+			log.Printf("save workspace sidebar width: %v", err)
+		}
+	})
+
 	// Wire presence/DND status setter. Captured workspaces map and
 	// activeTeamID by reference so the closure always targets the
 	// currently-active workspace context.
@@ -1380,6 +1408,7 @@ func run() error {
 			TeamID:           wctx.TeamID,
 			TeamName:         wctx.TeamName,
 			Theme:            cfg.ResolveTheme(teamID),
+			SidebarWidth:     cfg.ResolveWidth(teamID),
 			Channels:         wctx.Channels,
 			FinderItems:      wctx.FinderItems,
 			UserNames:        wctx.UserNames,
@@ -1532,6 +1561,7 @@ func run() error {
 				TeamID:           wctx.TeamID,
 				TeamName:         wctx.TeamName,
 				Theme:            cfg.ResolveTheme(wctx.TeamID),
+				SidebarWidth:     cfg.ResolveWidth(wctx.TeamID),
 				Channels:         wctx.Channels,
 				FinderItems:      wctx.FinderItems,
 				UserNames:        wctx.UserNames,

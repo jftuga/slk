@@ -179,6 +179,9 @@ func reduceWorkspaceReady(a *App, m WorkspaceReadyMsg) tea.Cmd {
 			a.compose.RefreshStyles()
 			a.threadCompose.RefreshStyles()
 		}
+		if m.SidebarWidth != 0 {
+			a.sidebar.SetWidth(m.SidebarWidth)
+		}
 		a.sidebar.SetSectionsProvider(m.SectionsProvider)
 		a.SetChannels(m.Channels)
 		a.channelFinder.SetItems(m.FinderItems)
@@ -272,6 +275,9 @@ func reduceWorkspaceSwitched(a *App, m WorkspaceSwitchedMsg) tea.Cmd {
 		a.sidebar.InvalidateCache()
 		a.compose.RefreshStyles()
 		a.threadCompose.RefreshStyles()
+	}
+	if m.SidebarWidth != 0 {
+		a.sidebar.SetWidth(m.SidebarWidth)
 	}
 	a.workspaceRail.SelectByID(m.TeamID)
 

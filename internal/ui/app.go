@@ -242,6 +242,9 @@ type App struct {
 	themeSaveFn    func(name string, scope themeswitcher.ThemeScope)
 	themeOverrides config.Theme
 
+	// Sidebar width persistence
+	widthSaveFn func(width int)
+
 	// presence owns per-workspace presence/DND cache, the DND-tick
 	// guard, and the custom-snooze numeric input buffer. See
 	// internal/ui/presence.go.
@@ -2079,6 +2082,12 @@ func (a *App) workspaceNameForActive() string {
 // global) so the implementation can route to the correct save target.
 func (a *App) SetThemeSaver(fn func(name string, scope themeswitcher.ThemeScope)) {
 	a.themeSaveFn = fn
+}
+
+// SetWidthSaver sets the callback for persisting the sidebar width.
+// The callback receives the current width after a resize.
+func (a *App) SetWidthSaver(fn func(width int)) {
+	a.widthSaveFn = fn
 }
 
 // SetStatusSetter registers a callback the App invokes when the user picks

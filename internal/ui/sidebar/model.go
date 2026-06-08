@@ -1575,6 +1575,18 @@ func (m Model) Width() int {
 	return m.width
 }
 
+func (m *Model) SetWidth(w int) {
+	if w < minWidth {
+		w = minWidth
+	}
+	if w > maxWidth {
+		w = maxWidth
+	}
+	m.width = w
+	m.cacheValid = false
+	m.dirty()
+}
+
 func (m *Model) GrowWidth() {
 	w := m.Width()
 	if w+widthStep <= maxWidth {

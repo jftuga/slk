@@ -181,10 +181,11 @@ type (
 		IsExternal bool
 	}
 	WorkspaceSwitchedMsg struct {
-		TeamID      string
-		TeamName    string
-		Theme       string // resolved theme name (per-workspace or global default)
-		Channels    []sidebar.ChannelItem
+		TeamID       string
+		TeamName     string
+		Theme        string // resolved theme name (per-workspace or global default)
+		SidebarWidth int    // resolved sidebar width (per-workspace or global default)
+		Channels     []sidebar.ChannelItem
 		FinderItems []channelfinder.Item
 		UserNames   map[string]string
 		// ExternalUsers maps userID -> true for users this workspace
@@ -240,10 +241,11 @@ type (
 		MemberIDs []string
 	}
 	WorkspaceReadyMsg struct {
-		TeamID      string
-		TeamName    string
-		Theme       string // resolved theme name (per-workspace or global default)
-		Channels    []sidebar.ChannelItem
+		TeamID       string
+		TeamName     string
+		Theme        string // resolved theme name (per-workspace or global default)
+		SidebarWidth int    // resolved sidebar width (per-workspace or global default)
+		Channels     []sidebar.ChannelItem
 		FinderItems []channelfinder.Item
 		UserNames   map[string]string
 		// ExternalUsers maps userID -> true for users this workspace

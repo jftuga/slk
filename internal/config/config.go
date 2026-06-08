@@ -130,6 +130,7 @@ type Sidebar struct {
 	// unread messages, and the currently-selected channel are never
 	// hidden regardless of this setting.
 	HideInactiveAfterDays int `toml:"hide_inactive_after_days"`
+	Width                 int `toml:"width"`
 }
 
 // Workspace holds per-workspace user preferences. The TOML key for
@@ -144,7 +145,8 @@ type Workspace struct {
 	// digit-key mapping (1-9). Positive values are explicit positions
 	// ascending; 0 or unset means "unordered" (sorts after ordered
 	// workspaces, alphabetically by slug). Ties in Order break by slug.
-	Order int `toml:"order"`
+	Order        int `toml:"order"`
+	SidebarWidth int `toml:"sidebar_width"`
 	// UseSlackSections overrides [general].use_slack_sections for this
 	// workspace. Nil means "fall through to global".
 	UseSlackSections *bool                 `toml:"use_slack_sections"`
@@ -351,6 +353,19 @@ func (c Config) EffectiveUseSlackSections(teamID string) bool {
 		return *c.General.UseSlackSections
 	}
 	return true
+}
+
+// ResolveWidth returns the sidebar width to use for the given workspace,
+// falling back to the global Sidebar.Width when no per-workspace width
+// is set, and to 30 when no global width is set either.
+func (c Config) ResolveWidth(teamID string) int {
+	if ws, ok := c.WorkspaceByTeamID(teamID); ok && ws.SidebarWidth != 0 {
+		return ws.SidebarWidth
+	}
+	if c.Sidebar.Width != 0 {
+		return c.Sidebar.Width
+	}
+	return 30
 }
 
 // ResolveTheme returns the theme name to use for the given workspace,
